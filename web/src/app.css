@@ -28,6 +28,7 @@
   --color-stone-850: #1c1a17;
   --color-stone-900: #1c1917;
   --color-stone-950: #141210;
+  --color-stone-975: #0a0807;
 
   --color-indigo-400: #8b7fd4;
   --color-indigo-500: #6e5fbd;
@@ -50,9 +51,16 @@
 /* ── Light mode (default) ────────────────────────────── */
 
 :root {
-  --bg: var(--color-stone-50);
-  --bg-subtle: var(--color-stone-100);
-  --surface: #fff;
+  /* Three-tier elevation:
+     --bg       : recessed content floor (deepest)
+     --surface  : cards / sticky headers / dropdowns INSIDE the content
+     --chrome   : sidebar + topbar — the outer shell that floats above content
+     Keep these visually distinct so an in-content card never visually
+     merges with the chrome it sits adjacent to. */
+  --bg: var(--color-stone-100);
+  --bg-subtle: var(--color-stone-200);
+  --surface: var(--color-stone-50);
+  --chrome: #fff;
   --text: var(--color-stone-900);
   --text-muted: var(--color-stone-500);
   --text-faint: var(--color-stone-400);
@@ -68,6 +76,11 @@
   --success: var(--color-green-600);
   --success-bg: var(--color-green-bg);
 
+  /* Shadow cast by the elevated chrome onto the recessed content panel.
+     Applied as an inset shadow on the panel's top/left edges so the
+     "chrome floats above" effect reads without a hard border line. */
+  --shadow-recess: rgba(0, 0, 0, 0.02);
+
   /* The dark panel on auth pages */
   --panel-bg: var(--color-stone-900);
   --panel-text: var(--color-stone-50);
@@ -77,9 +90,13 @@
 /* ── Dark mode ───────────────────────────────────────── */
 
 .dark {
-  --bg: var(--color-stone-950);
-  --bg-subtle: var(--color-stone-800);
-  --surface: var(--color-stone-850);
+  /* Three-tier elevation, same roles as light mode. --surface is
+     intentionally BRIGHTER than --chrome here: cards inside the
+     content panel are the focal layer; the outer chrome recedes. */
+  --bg: var(--color-stone-975);
+  --bg-subtle: var(--color-stone-900);
+  --surface: var(--color-stone-800);
+  --chrome: var(--color-stone-850);
   --text: var(--color-stone-200);
   --text-muted: var(--color-stone-400);
   --text-faint: var(--color-stone-600);
@@ -95,6 +112,10 @@
   --success: var(--color-green-400);
   --success-bg: var(--color-green-bg-dark);
 
+  /* Heavier in dark mode — the same alpha that's subtle on white reads
+     as nothing against a near-black panel. */
+  --shadow-recess: rgba(0, 0, 0, 0.17);
+
   --panel-bg: var(--color-stone-800);
   --panel-text: var(--color-stone-200);
   --panel-muted: var(--color-stone-500);
@@ -107,6 +128,40 @@
   *::before,
   *::after {
     box-sizing: border-box;
+  }
+
+  /* ── Themed scrollbars ───────────────────────────────
+     The browser defaults are loud, gray, and clash hard with our
+     surface-tier elevation. Style them globally so anywhere overflow
+     happens (board columns, page list, code blocks, modals, etc.)
+     gets a thin, theme-aware track + thumb. */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    /* `background-clip: padding-box` plus a transparent border gives
+       the thumb a visual gap from the track edge, which reads as more
+       intentional than the OS default. */
+    background-color: var(--border);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-faint);
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  /* Firefox. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
   }
 
   html {

@@ -59,6 +59,7 @@
     | { type: "app"; page: "project-new" }
     | { type: "app"; page: "project-settings"; project: string }
     | { type: "app"; page: "issues"; project: string }
+    | { type: "app"; page: "board"; project: string }
     | { type: "app"; page: "issue-new"; project: string }
     | { type: "app"; page: "issue-detail"; project: string; identifier: string }
     | { type: "app"; page: "pages"; project: string }
@@ -86,6 +87,12 @@
     const issueListMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/issues$/i);
     if (issueListMatch) {
       return { type: "app", page: "issues", project: issueListMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/board
+    const boardMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/board$/i);
+    if (boardMatch) {
+      return { type: "app", page: "board", project: boardMatch[1] };
     }
 
     // Project-scoped: /{IDENTIFIER}/issues/new
@@ -154,6 +161,12 @@
       <ProjectSettings {navigate} projectIdentifier={parsed.project} {onProjectChange} />
     {:else if parsed.page === "issues"}
       <IssueList {navigate} projectIdentifier={parsed.project} />
+    {:else if parsed.page === "board"}
+      <IssueList
+        {navigate}
+        projectIdentifier={parsed.project}
+        layout="board"
+      />
     {:else if parsed.page === "issue-new"}
       <IssueNew {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "issue-detail"}

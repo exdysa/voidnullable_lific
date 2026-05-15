@@ -14,15 +14,36 @@
   import {
     Plus, Search, ChevronRight, CircleCheckBig, CircleX, X,
     Circle, CircleDot, CircleDashed, Layers, SignalHigh, SignalMedium, SignalLow, Signal, AlertTriangle,
+    List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
+    ArrowDownUp, ArrowDown, ArrowUp, Hash, Clock,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
+  import Tooltip from "../lib/Tooltip.svelte";
+  import { dndzone, type DndEvent } from "svelte-dnd-action";
+  import { flip } from "svelte/animate";
+  import { getContext } from "svelte";
+
+  const topbarCtx = getContext<{
+    set: (s: import("svelte").Snippet | undefined) => void;
+  } | undefined>("lific:topbar");
+
+  // Register our toolbar with Layout's chrome topbar slot. Clear it on
+  // unmount so the next route doesn't inherit our content.
+  $effect(() => {
+    topbarCtx?.set(topbarContent);
+    return () => topbarCtx?.set(undefined);
+  });
 
   let {
     navigate,
     projectIdentifier,
+    layout = "list",
   }: {
     navigate: (path: string) => void;
     projectIdentifier: string;
+    /** Render mode. Both modes share data loading, filters, sort, and
+     *  topbar; only the body below the chrome differs. */
+    layout?: "list" | "board";
   } = $props();
 
   let project = $state<Project | null>(null);
@@ -171,12 +192,73 @@
       : issues
   );
 
+  // ── Sort ────────────────────────────────────────────
+  // Topbar-controlled ordering. Applied after filter, before grouping —
+  // so the sort is honored both inside each status group AND in the
+  // flat list. `sortDir` is interpreted per field:
+  //   priority asc  = urgent first (lowest rank number)
+  //   priority desc = none first
+  //   age      asc  = oldest first
+  //   age      desc = newest first
+  //   number   asc  = smallest issue # first
+  //   number   desc = largest issue # first
+  type SortField = "priority" | "age" | "number";
+  type SortDir = "asc" | "desc";
+  let sortField = $state<SortField>("priority");
+  let sortDir = $state<SortDir>("asc"); // default: urgent first
+
+  const PRIORITY_RANK: Record<string, number> = {
+    urgent: 0,
+    high: 1,
+    medium: 2,
+    low: 3,
+    none: 4,
+  };
+
+  function compareIssues(a: Issue, b: Issue): number {
+    let r = 0;
+    switch (sortField) {
+      case "priority":
+        r = (PRIORITY_RANK[a.priority] ?? 99)
+          - (PRIORITY_RANK[b.priority] ?? 99);
+        // Tie-break: newest first within the same priority so urgent
+        // issues from today float above urgents from last month.
+        if (r === 0) r = b.created_at.localeCompare(a.created_at);
+        break;
+      case "age":
+        r = a.created_at.localeCompare(b.created_at);
+        break;
+      case "number":
+        r = a.sequence - b.sequence;
+        break;
+    }
+    return sortDir === "asc" ? r : -r;
+  }
+
+  // Sort applied to filtered issues. We make a fresh array so we don't
+  // mutate the underlying `issues` state in place.
+  let sortedIssues = $derived(
+    [...filteredIssues].sort(compareIssues)
+  );
+
+  /** Clicking a field selects it (with default asc) or, if already
+   *  selected, toggles direction. Matches the spreadsheet-column pattern
+   *  users already expect. */
+  function selectSort(field: SortField) {
+    if (sortField === field) {
+      sortDir = sortDir === "asc" ? "desc" : "asc";
+    } else {
+      sortField = field;
+      sortDir = "asc";
+    }
+  }
+
   // Group issues by status for the list view
   let groupedByStatus = $derived.by(() => {
     if (filterStatus) return null; // Don't group when filtered to single status
     const groups: Record<string, Issue[]> = {};
     for (const status of STATUSES) {
-      const matching = filteredIssues.filter((i) => i.status === status);
+      const matching = sortedIssues.filter((i) => i.status === status);
       if (matching.length > 0) groups[status] = matching;
     }
     return groups;
@@ -192,6 +274,115 @@
     filterLabel = "";
     filterModule = "";
     searchQuery = "";
+  }
+
+  // ── Topbar UI state ─────────────────────────────────
+  // Search collapses to an icon by default; expands inline on click or `/`.
+  let searchExpanded = $state(false);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  // Keyboard cheatsheet popover.
+  let hintsOpen = $state(false);
+  // Display options popover (Group/Density). Wired in sub-phase 1b.
+  let displayOpen = $state(false);
+  // Sort popover (field + direction).
+  let sortOpen = $state(false);
+
+  // ── Board view: per-status column visibility ─────────
+  // Users can hide columns they don't care about in their workflow
+  // (e.g. "Cancelled" once a project is mid-flight). Stored per-project
+  // in localStorage so the choice persists across reloads.
+  let hiddenStatuses = $state<Set<string>>(new Set());
+
+  function storageKeyForHidden(id: string) {
+    return `lific:board:hidden-statuses:${id}`;
+  }
+
+  function toggleStatusVisibility(status: string) {
+    const next = new Set(hiddenStatuses);
+    if (next.has(status)) next.delete(status);
+    else next.add(status);
+    hiddenStatuses = next;
+    try {
+      localStorage.setItem(
+        storageKeyForHidden(projectIdentifier),
+        JSON.stringify([...next]),
+      );
+    } catch {
+      // localStorage can fail in private mode / quota — silently degrade
+      // to in-memory state, which is fine for the rest of the session.
+    }
+  }
+
+  // Re-hydrate hidden-statuses when the active project changes. Each
+  // project owns its own visibility state.
+  $effect(() => {
+    const id = projectIdentifier;
+    try {
+      const raw = localStorage.getItem(storageKeyForHidden(id));
+      hiddenStatuses = raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      hiddenStatuses = new Set();
+    }
+  });
+
+  // ── Board view: drag-and-drop state ──────────────────
+  // svelte-dnd-action needs each zone to own a writable items array
+  // that it can mutate during consider/finalize. We sync that from the
+  // sorted-issues derived value (so filters + sort feed into it), and
+  // svelte-dnd-action takes over during the drag lifecycle.
+  let columnItems = $state<Record<string, Issue[]>>({});
+
+  $effect(() => {
+    if (layout !== "board") return;
+    const next: Record<string, Issue[]> = {};
+    for (const s of STATUSES) {
+      next[s] = sortedIssues.filter((i) => i.status === s);
+    }
+    columnItems = next;
+  });
+
+  function handleConsider(status: string, e: CustomEvent<DndEvent<Issue>>) {
+    columnItems[status] = e.detail.items as Issue[];
+  }
+
+  async function handleFinalize(
+    status: string,
+    e: CustomEvent<DndEvent<Issue>>,
+  ) {
+    const newItems = e.detail.items as Issue[];
+
+    // Find any issue that landed in this column with a different status
+    // — that's a cross-column drop and needs persisting. There can only
+    // ever be one such item per finalize (a single drag op).
+    const moved = newItems.find((i) => i.status !== status);
+    columnItems[status] = newItems;
+
+    if (!moved) return;
+
+    // Optimistic: stamp the new status onto the master issues list so
+    // sortedIssues and the cell stay coherent until the API resolves.
+    const idx = issues.findIndex((i) => i.id === moved.id);
+    if (idx >= 0) {
+      issues = issues.map((i) =>
+        i.id === moved.id ? { ...i, status } : i,
+      );
+    }
+
+    const res = await updateIssue(moved.id, { status });
+    if (!res.ok) {
+      // Rollback by re-fetching. Simpler than trying to undo the local
+      // mutation surgically — drop failures should be rare.
+      await loadIssues();
+    }
+  }
+
+  function openSearch() {
+    searchExpanded = true;
+    requestAnimationFrame(() => searchInputEl?.focus());
+  }
+  function maybeCollapseSearch() {
+    // Collapse back to icon if user blurred an empty input.
+    if (!searchQuery) searchExpanded = false;
   }
 
   // ── Keyboard navigation ──────────────────────────────
@@ -258,7 +449,7 @@
       }
       return flat;
     }
-    return filteredIssues;
+    return sortedIssues;
   });
 
   // Reset focus when issues change — but not from a status cycle
@@ -394,6 +585,16 @@
         inlineCreateStatusIdx = 0;
         inlineCreateTitle = "";
         break;
+      case "/":
+        // Expand the topbar search and focus it.
+        e.preventDefault();
+        openSearch();
+        break;
+      case "?":
+        // Toggle the keyboard cheatsheet popover.
+        e.preventDefault();
+        hintsOpen = !hintsOpen;
+        break;
       case "s":
         if (focusedIndex >= 0 && focusedIndex < flatIssues.length && !statusUpdating && canFireKey()) {
           e.preventDefault();
@@ -418,7 +619,13 @@
         }
         break;
       case "Escape":
-        if (statusDropdownId !== null) {
+        if (hintsOpen) {
+          hintsOpen = false;
+        } else if (displayOpen) {
+          displayOpen = false;
+        } else if (sortOpen) {
+          sortOpen = false;
+        } else if (statusDropdownId !== null) {
           statusDropdownId = null;
         } else if (inlineCreateActive) {
           inlineCreateActive = false;
@@ -463,41 +670,87 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onmousemove={handleMouseMove} onclick={() => { statusDropdownId = null; inlineCreateStatusOpen = false; }} />
+<svelte:window
+  onkeydown={handleKeydown}
+  onmousemove={handleMouseMove}
+  onclick={() => {
+    statusDropdownId = null;
+    inlineCreateStatusOpen = false;
+    hintsOpen = false;
+    displayOpen = false;
+    sortOpen = false;
+  }}
+/>
 
-<div class="h-full flex flex-col">
-  <!-- Toolbar -->
-  <div
-    class="shrink-0 flex items-center gap-3 px-6 py-2.5
-           border-b border-[var(--border)] bg-[var(--surface)]"
-  >
-    <!-- Breadcrumb: Project > Issues  (count) -->
-    <div class="flex items-center gap-1.5 shrink-0">
-      <button
-        class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
-               hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/settings`)}
-      >
-        {projectIdentifier}
-      </button>
-      <ChevronRight size={12} class="text-[var(--text-faint)]" />
-      <span class="text-[0.8125rem] font-medium text-[var(--text)]">
-        Issues
-      </span>
-      {#if !loading}
-        <span
-          class="text-[0.6875rem] text-[var(--text-faint)] bg-[var(--bg-subtle)]
-                 px-1.5 py-0.5 rounded-full font-medium tabular-nums"
+<!-- Register topbar with Layout (chrome area above the inset panel).
+     Layout: left zone (scope: breadcrumb + view switcher) — filter cluster —
+     right zone (display / search / keyboard help / primary action). -->
+{#snippet topbarContent()}
+  <div class="flex items-center gap-3 px-6 py-2 w-full">
+
+    <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
+    <div class="flex items-center gap-3 shrink-0">
+      <!-- Breadcrumb -->
+      <div class="flex items-center gap-1.5">
+        <button
+          class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
+                 hover:text-[var(--text)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/settings`)}
         >
-          {filteredIssues.length}
+          {projectIdentifier}
+        </button>
+        <ChevronRight size={12} class="text-[var(--text-faint)]" />
+        <span class="text-[0.8125rem] font-medium text-[var(--text)]">
+          Issues
         </span>
-      {/if}
+        {#if !loading}
+          <span
+            class="ml-1 text-[0.6875rem] text-[var(--text-faint)] font-medium
+                   tabular-nums"
+          >
+            {filteredIssues.length}
+          </span>
+        {/if}
+      </div>
+
+      <!-- View switcher pill. Routes to `/{project}/issues` for list mode,
+           `/{project}/board` for board mode. Active state derives from the
+           `layout` prop, which is set by App's route parser. -->
+      <div
+        class="flex items-center gap-0.5 p-0.5 rounded-md
+               bg-[var(--bg-subtle)] border border-[var(--border)]"
+      >
+        <button
+          class="flex items-center gap-1 px-2 py-0.5 rounded
+                 text-[0.75rem] font-medium transition-colors
+                 {layout === 'list'
+            ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          aria-pressed={layout === "list"}
+          onclick={() => navigate(`/${projectIdentifier}/issues`)}
+        >
+          <ListIcon size={11} class="shrink-0" />
+          List
+        </button>
+        <button
+          class="flex items-center gap-1 px-2 py-0.5 rounded
+                 text-[0.75rem] font-medium transition-colors
+                 {layout === 'board'
+            ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          aria-pressed={layout === "board"}
+          onclick={() => navigate(`/${projectIdentifier}/board`)}
+        >
+          <LayoutGrid size={11} class="shrink-0" />
+          Board
+        </button>
+      </div>
     </div>
 
     <!-- Separator -->
     <div class="w-px h-4 bg-[var(--border)]"></div>
 
-    <!-- Filters -->
+    <!-- ── FILTERS (sub-phase 1b will replace with `+ Filter` + chips) ── -->
     <div class="flex items-center gap-1.5">
       <!-- Status -->
       <Select options={statusOptions} bind:value={filterStatus} placeholder="Status" size="sm" class="w-auto">
@@ -611,47 +864,229 @@
           Clear
         </button>
       {/if}
-
-      <!-- Separator -->
-      <div class="w-px h-4 bg-[var(--border)]"></div>
-
-      <!-- Keyboard hints -->
-      <div class="flex items-center gap-2.5 text-[0.75rem] text-[var(--text-faint)]">
-        <span class="flex items-center gap-1">
-          <kbd class="px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--bg-subtle)] font-mono text-[0.6875rem] leading-none">C</kbd>
-          new
-        </span>
-        <span class="flex items-center gap-1">
-          <kbd class="px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--bg-subtle)] font-mono text-[0.6875rem] leading-none">S</kbd>
-          status
-        </span>
-        <span class="flex items-center gap-1">
-          <kbd class="px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--bg-subtle)] font-mono text-[0.6875rem] leading-none">&uarr;&darr;</kbd>
-          navigate
-        </span>
-      </div>
     </div>
 
-    <!-- Spacer -->
-    <div class="flex-1"></div>
+    <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
+    <div class="ml-auto flex items-center gap-0.5 shrink-0">
 
-    <!-- Search + New -->
-    <div class="flex items-center gap-1.5 shrink-0">
+      <!-- Sort button + popover. Shows current field + direction; clicking
+           a row selects it (default asc) or, if already active, toggles
+           direction. Mirrors the spreadsheet-column sort pattern users
+           already know from any data tool. -->
       <div class="relative">
-        <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
-          <Search size={13} />
-        </div>
-        <input
-          type="text"
-          placeholder="Search..."
-          bind:value={searchQuery}
-          class="w-[160px] pl-7 pr-2.5 py-1 text-[0.8125rem] rounded-md
-                 border border-[var(--border)] bg-[var(--surface)]
-                 text-[var(--text)] placeholder:text-[var(--text-faint)]
-                 focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]
-                 focus:w-[220px] transition-all"
-        />
+        <Tooltip
+          content={sortOpen
+            ? null
+            : `Sort: ${sortField === "age" ? "Age" : sortField === "number" ? "Issue #" : "Priority"} ${sortDir === "asc" ? "ascending" : "descending"}`}
+          placement="bottom"
+        >
+          <button
+            class="h-7 flex items-center gap-1 px-2 rounded-md
+                   text-[0.75rem] font-medium
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors
+                   {sortOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+            onclick={(e) => {
+              e.stopPropagation();
+              sortOpen = !sortOpen;
+              displayOpen = false;
+              hintsOpen = false;
+            }}
+          >
+            {#if sortDir === "asc"}
+              <ArrowUp size={12} class="shrink-0" />
+            {:else}
+              <ArrowDown size={12} class="shrink-0" />
+            {/if}
+            <span>
+              {sortField === "age"
+                ? "Age"
+                : sortField === "number"
+                  ? "Issue #"
+                  : "Priority"}
+            </span>
+          </button>
+        </Tooltip>
+        {#if sortOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <div
+            class="absolute right-0 top-full mt-1.5 z-30 w-[220px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-lg shadow-lg py-1.5 text-[0.8125rem]"
+            onclick={(e) => e.stopPropagation()}
+          >
+            <div class="px-3 pt-1 pb-1.5 text-[var(--text-faint)]
+                        text-[0.6875rem] uppercase tracking-widest
+                        font-semibold">
+              Sort by
+            </div>
+            {#snippet sortRow(field: SortField, label: string, Icon: typeof Hash)}
+              {@const active = sortField === field}
+              <button
+                class="w-full flex items-center justify-between gap-2
+                       px-3 py-1.5 text-left transition-colors
+                       {active
+                  ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                onclick={() => selectSort(field)}
+              >
+                <span class="flex items-center gap-2">
+                  <Icon size={13} class="shrink-0" />
+                  {label}
+                </span>
+                {#if active}
+                  <span class="text-[var(--accent)] flex items-center">
+                    {#if sortDir === "asc"}
+                      <ArrowUp size={13} />
+                    {:else}
+                      <ArrowDown size={13} />
+                    {/if}
+                  </span>
+                {/if}
+              </button>
+            {/snippet}
+            {@render sortRow("priority", "Priority", Signal)}
+            {@render sortRow("age", "Age", Clock)}
+            {@render sortRow("number", "Issue number", Hash)}
+            <div class="px-3 pt-2 pb-1 mt-1 text-[0.6875rem]
+                        text-[var(--text-faint)] border-t
+                        border-[var(--border)] leading-snug">
+              Click the active row to flip direction.
+            </div>
+          </div>
+        {/if}
       </div>
+
+      <!-- Display options button (Group/Density — wired in sub-phase 1b). -->
+      <div class="relative">
+        <Tooltip content={displayOpen ? null : "Display options"} placement="bottom">
+          <button
+            class="size-7 flex items-center justify-center rounded-md
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors
+                   {displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+            onclick={(e) => { e.stopPropagation(); displayOpen = !displayOpen; sortOpen = false; hintsOpen = false; }}
+          >
+            <SlidersHorizontal size={14} />
+          </button>
+        </Tooltip>
+        {#if displayOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <div
+            class="absolute right-0 top-full mt-1.5 z-30 w-[240px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-lg shadow-lg p-3 text-[0.8125rem]"
+            onclick={(e) => e.stopPropagation()}
+          >
+            <div class="text-[var(--text-faint)] text-[0.6875rem]
+                        uppercase tracking-widest font-semibold mb-2">
+              Display
+            </div>
+            <div class="text-[var(--text-muted)]">
+              Grouping &amp; density land here next pass.
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Search: collapsed to icon, expands inline on click or `/`. -->
+      {#if searchExpanded}
+        <div class="relative">
+          <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
+            <Search size={12} />
+          </div>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            type="text"
+            placeholder="Search issues..."
+            bind:this={searchInputEl}
+            bind:value={searchQuery}
+            onblur={maybeCollapseSearch}
+            onkeydown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                searchQuery = "";
+                searchExpanded = false;
+                (e.currentTarget as HTMLInputElement).blur();
+              }
+            }}
+            class="w-[200px] pl-7 pr-2 py-1 text-[0.8125rem] rounded-md
+                   border border-[var(--border)] bg-[var(--surface)]
+                   text-[var(--text)] placeholder:text-[var(--text-faint)]
+                   focus:border-[var(--accent)]
+                   focus:shadow-[0_0_0_3px_var(--accent-subtle)]
+                   outline-none transition-colors"
+          />
+        </div>
+      {:else}
+        <Tooltip content="Search  ·  /" placement="bottom">
+          <button
+            class="size-7 flex items-center justify-center rounded-md
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors"
+            onclick={(e) => { e.stopPropagation(); openSearch(); }}
+          >
+            <Search size={14} />
+          </button>
+        </Tooltip>
+      {/if}
+
+      <!-- Keyboard cheatsheet popover. -->
+      <div class="relative">
+        <Tooltip content={hintsOpen ? null : "Shortcuts  ·  ?"} placement="bottom">
+          <button
+            class="size-7 flex items-center justify-center rounded-md
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors
+                   {hintsOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+            onclick={(e) => { e.stopPropagation(); hintsOpen = !hintsOpen; displayOpen = false; }}
+          >
+            <HelpCircle size={14} />
+          </button>
+        </Tooltip>
+        {#if hintsOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <div
+            class="absolute right-0 top-full mt-1.5 z-30 w-[240px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-lg shadow-lg p-3"
+            onclick={(e) => e.stopPropagation()}
+          >
+            <div class="text-[var(--text-faint)] text-[0.6875rem]
+                        uppercase tracking-widest font-semibold mb-2">
+              Keyboard
+            </div>
+            <ul class="space-y-1.5 text-[0.8125rem]">
+              {#each [
+                ["C", "New issue"],
+                ["S", "Cycle status"],
+                ["↑ ↓ / J K", "Navigate"],
+                ["Enter", "Open"],
+                ["/", "Search"],
+                ["?", "Show this"],
+                ["Esc", "Clear / close"],
+              ] as [keys, label]}
+                <li class="flex items-center justify-between gap-3">
+                  <span class="text-[var(--text-muted)]">{label}</span>
+                  <kbd class="px-1.5 py-0.5 rounded
+                              border border-[var(--border)]
+                              bg-[var(--bg-subtle)]
+                              text-[var(--text)]
+                              font-mono text-[0.6875rem] leading-none
+                              shrink-0">
+                    {keys}
+                  </kbd>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Separator -->
+      <div class="w-px h-4 bg-[var(--border)] mx-1.5"></div>
+
+      <!-- Primary action: New issue. -->
       <button
         class="flex items-center gap-1 text-[0.8125rem] font-medium
                text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
@@ -663,7 +1098,234 @@
       </button>
     </div>
   </div>
+{/snippet}
 
+{#if layout === "board"}
+  <!-- ── BOARD LAYOUT ──────────────────────────────────────────
+       Horizontally-scrolling kanban. Columns are statuses (filterable
+       to one via the Status filter, or toggled in/out via the visibility
+       pills below). Within a column, cards honor the active sort.
+       v1 = click-card-to-open; drag-and-drop tracked in LIF-100. -->
+  <div class="h-full flex flex-col">
+    <!-- Status visibility pills. Click a pill to hide/show that column.
+         Visible columns sit "raised" (chrome bg + soft shadow); hidden
+         ones sit recessed against the bg-subtle track, like the
+         unselected segment of an iOS-style control. -->
+    <div
+      class="shrink-0 flex items-center gap-3 px-6 pt-3 pb-2"
+    >
+      <span
+        class="text-[0.6875rem] font-semibold uppercase tracking-widest
+               text-[var(--text-faint)]"
+      >
+        Columns
+      </span>
+      <div
+        class="flex items-center gap-0.5 p-0.5 rounded-md
+               bg-[var(--bg-subtle)] border border-[var(--border)]"
+      >
+        {#each STATUSES as status (status)}
+          {@const visible = !hiddenStatuses.has(status)}
+          {@const count = sortedIssues.filter((i) => i.status === status).length}
+          <Tooltip
+            content={`${visible ? "Hide" : "Show"} ${status[0].toUpperCase() + status.slice(1)}`}
+            placement="bottom"
+          >
+            <button
+              class="flex items-center gap-1.5 px-2 py-1 rounded
+                     text-[0.75rem] font-medium transition-colors
+                     {visible
+                ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                : 'text-[var(--text-faint)] hover:text-[var(--text-muted)]'}"
+              aria-pressed={visible}
+              onclick={() => toggleStatusVisibility(status)}
+            >
+              {@render statusIcon(status, 12)}
+              <span class="capitalize">{status}</span>
+              <span
+                class="tabular-nums text-[0.6875rem]
+                       {visible
+                  ? 'text-[var(--text-faint)]'
+                  : 'text-[var(--text-faint)]'}"
+              >
+                {count}
+              </span>
+            </button>
+          </Tooltip>
+        {/each}
+      </div>
+    </div>
+
+    <!-- Columns -->
+    <div class="flex-1 flex overflow-x-auto overflow-y-hidden min-h-0">
+    {#if loading}
+      <div class="flex-1 flex items-center justify-center">
+        <div
+          class="size-6 rounded-full border-2 border-[var(--border)]
+                 border-t-[var(--accent)] animate-spin"
+        ></div>
+      </div>
+    {:else if error}
+      <div class="flex-1 flex items-center justify-center">
+        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
+      </div>
+    {:else}
+      {#each STATUSES as status (status)}
+        {@const colIssues = columnItems[status] ?? []}
+        {#if (!filterStatus || filterStatus === status) && !hiddenStatuses.has(status)}
+          <div
+            class="w-[300px] shrink-0 flex flex-col h-full
+                   border-r border-[var(--border)] last:border-r-0"
+          >
+            <!-- Column header. Sticky-like: not scrollable with cards. -->
+            <div
+              class="shrink-0 flex items-center gap-2 px-3 py-2.5
+                     border-b border-[var(--border)]"
+            >
+              {@render statusIcon(status, 14)}
+              <span
+                class="text-[0.75rem] font-semibold uppercase tracking-widest
+                       text-[var(--text-muted)]"
+              >
+                {status}
+              </span>
+              <span class="text-[0.75rem] text-[var(--text-faint)] tabular-nums">
+                {colIssues.length}
+              </span>
+              <div class="flex-1"></div>
+              <Tooltip content="New {status} issue" placement="bottom">
+                <button
+                  class="size-5 flex items-center justify-center rounded
+                         text-[var(--text-faint)] hover:text-[var(--accent)]
+                         hover:bg-[var(--bg-subtle)] transition-colors"
+                  onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
+                >
+                  <Plus size={12} />
+                </button>
+              </Tooltip>
+            </div>
+
+            <!-- Cards container wraps the dndzone so we can render the
+                 empty-state placeholder as a sibling (svelte-dnd-action
+                 treats every direct child of a dndzone as an item, so
+                 non-item children would break drag accounting). -->
+            <div class="flex-1 overflow-y-auto p-2 min-h-0 flex flex-col">
+              <!-- Drop zone. All zones share `type: "lific-issues"` so an
+                   item dragged from any column drops into any other. -->
+              <div
+                class="flex flex-col gap-2 flex-1 min-h-[40px]"
+                use:dndzone={{
+                  items: colIssues,
+                  flipDurationMs: 150,
+                  type: "lific-issues",
+                  dropTargetStyle: {
+                    outline: "2px dashed var(--accent)",
+                    outlineOffset: "-4px",
+                    borderRadius: "8px",
+                  },
+                }}
+                onconsider={(e) => handleConsider(status, e as CustomEvent<DndEvent<Issue>>)}
+                onfinalize={(e) => handleFinalize(status, e as CustomEvent<DndEvent<Issue>>)}
+              >
+              {#each colIssues as issue (issue.id)}
+                <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
+                <article
+                  animate:flip={{ duration: 150 }}
+                  class="bg-[var(--surface)] border border-[var(--border)]
+                         rounded-md p-2.5 cursor-grab active:cursor-grabbing
+                         hover:border-[var(--text-faint)]
+                         transition-colors group"
+                  tabindex="0"
+                  onclick={() =>
+                    navigate(`/${projectIdentifier}/issues/${issue.identifier}`)}
+                >
+                  <!-- Top row: identifier + priority -->
+                  <div class="flex items-center gap-2 mb-1.5">
+                    <span
+                      class="text-[0.6875rem] font-mono
+                             text-[var(--text-faint)]"
+                    >
+                      {issue.identifier}
+                    </span>
+                    <div class="flex-1"></div>
+                    {#if issue.priority !== "none"}
+                      <Tooltip
+                        content={issue.priority[0].toUpperCase() +
+                          issue.priority.slice(1)}
+                      >
+                        {@render priorityIcon(issue.priority, 14)}
+                      </Tooltip>
+                    {/if}
+                  </div>
+
+                  <!-- Title -->
+                  <h3
+                    class="text-[0.8125rem] text-[var(--text)] leading-snug
+                           line-clamp-3
+                           {issue.status === 'done' ||
+                           issue.status === 'cancelled'
+                      ? 'line-through text-[var(--text-muted)]'
+                      : ''}"
+                  >
+                    {issue.title}
+                  </h3>
+
+                  <!-- Bottom: labels + updated time -->
+                  {#if issue.labels.length > 0 || issue.updated_at}
+                    <div
+                      class="flex items-center gap-1.5 mt-2 flex-wrap"
+                    >
+                      {#each issue.labels.slice(0, 3) as lbl}
+                        {@const labelObj = labels.find(
+                          (l) => l.name === lbl
+                        )}
+                        <span
+                          class="text-[0.625rem] font-medium px-1.5 py-0.5
+                                 rounded-full border border-[var(--border)]"
+                          style={labelObj
+                            ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;`
+                            : ""}
+                        >
+                          {lbl}
+                        </span>
+                      {/each}
+                      {#if issue.labels.length > 3}
+                        <span class="text-[0.625rem] text-[var(--text-faint)]">
+                          +{issue.labels.length - 3}
+                        </span>
+                      {/if}
+                      <div class="flex-1"></div>
+                      <span
+                        class="text-[0.625rem] text-[var(--text-faint)]
+                               tabular-nums"
+                      >
+                        {formatRelativeDate(issue.updated_at)}
+                      </span>
+                    </div>
+                  {/if}
+                </article>
+              {/each}
+              </div>
+              {#if colIssues.length === 0}
+                <!-- Visual-only empty placeholder. pointer-events-none so
+                     it never intercepts drop hits on the zone above. -->
+                <div
+                  class="pointer-events-none text-center py-6
+                         text-[0.75rem] text-[var(--text-faint)]"
+                >
+                  No issues
+                </div>
+              {/if}
+            </div>
+          </div>
+        {/if}
+      {/each}
+    {/if}
+    </div>
+  </div>
+{:else}
+
+<div class="h-full flex flex-col">
   <!-- Inline create row (sticky above scrollable list) -->
   {#if inlineCreateActive}
       <div
@@ -810,13 +1472,15 @@
         </div>
       {/each}
     {:else}
-      <!-- Flat list -->
-      {#each filteredIssues as issue, i (issue.id)}
+      <!-- Flat list (active when a single status filter is applied, so
+           grouping is skipped). Honors the same sort as grouped view. -->
+      {#each sortedIssues as issue, i (issue.id)}
         {@render issueRow(issue, i)}
       {/each}
     {/if}
   </div>
 </div>
+{/if}
 
 {#snippet issueRow(issue: Issue, idx: number)}
   {@const isFocused = idx === focusedIndex}
@@ -833,24 +1497,31 @@
     onclick={() => navigate(`/${projectIdentifier}/issues/${issue.identifier}`)}
     onmouseenter={(e) => { if (shouldAcceptMouse(e)) focusedIndex = idx; }}
   >
-    <!-- Status indicator (clickable to pick) -->
+    <!-- Status indicator (clickable to pick).
+         Tooltip suppressed while the status picker is open for this row,
+         otherwise it'd hover-fight with the dropdown. -->
     <div class="relative shrink-0">
-      <button
-        class="size-4 flex items-center justify-center transition-colors
-               hover:text-[var(--accent)]"
-        title="Status: {issue.status}"
-        onclick={(e) => {
-          e.stopPropagation();
-          if (statusDropdownId === issue.id) {
-            statusDropdownId = null;
-          } else {
-            statusDropdownId = issue.id;
-            inlineCreateStatusIdx = Math.max(0, STATUSES.indexOf(issue.status));
-          }
-        }}
+      <Tooltip
+        content={statusDropdownId === issue.id
+          ? null
+          : issue.status[0].toUpperCase() + issue.status.slice(1)}
       >
-        {@render statusIcon(issue.status, 16)}
-      </button>
+        <button
+          class="size-4 flex items-center justify-center transition-colors
+                 hover:text-[var(--accent)]"
+          onclick={(e) => {
+            e.stopPropagation();
+            if (statusDropdownId === issue.id) {
+              statusDropdownId = null;
+            } else {
+              statusDropdownId = issue.id;
+              inlineCreateStatusIdx = Math.max(0, STATUSES.indexOf(issue.status));
+            }
+          }}
+        >
+          {@render statusIcon(issue.status, 16)}
+        </button>
+      </Tooltip>
       {#if statusDropdownId === issue.id}
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
@@ -926,13 +1597,15 @@
       </div>
     {/if}
 
-    <!-- Priority badge -->
-    <span
-      class="text-[0.6875rem] font-medium shrink-0 w-[52px] text-right
-             {priorityColor(issue.priority)}"
-    >
+    <!-- Priority icon. Matches the icon used in the filter dropdown so the
+         row and the filter chip vocabulary stay consistent. -->
+    <span class="shrink-0 w-9 flex items-center justify-end">
       {#if issue.priority !== "none"}
-        {issue.priority}
+        <Tooltip
+          content={issue.priority[0].toUpperCase() + issue.priority.slice(1)}
+        >
+          {@render priorityIcon(issue.priority, 28)}
+        </Tooltip>
       {/if}
     </span>
 
@@ -971,14 +1644,4 @@
   {/if}
 {/snippet}
 
-<script lang="ts" module>
-  function priorityColor(priority: string): string {
-    switch (priority) {
-      case "urgent": return "text-[var(--error)]";
-      case "high": return "text-orange-500";
-      case "medium": return "text-[var(--accent)]";
-      case "low": return "text-[var(--text-muted)]";
-      default: return "text-[var(--text-faint)]";
-    }
-  }
-</script>
+
