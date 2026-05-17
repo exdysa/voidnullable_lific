@@ -44,6 +44,32 @@
     editable?: boolean;
   } = $props();
 
+  // Back-arrow destination mirrors whichever list layout the user was
+  // last viewing for this project (set by IssueList). Falling back to
+  // the flat issues list preserves prior behavior when nothing's stored.
+  function backRoute(): string {
+    let layout = "list";
+    try {
+      const raw = localStorage.getItem(`lific:list:layout:${projectIdentifier}`);
+      if (raw === "board" || raw === "list") layout = raw;
+    } catch {
+      // ignore
+    }
+    return layout === "board"
+      ? `/${projectIdentifier}/board`
+      : `/${projectIdentifier}/issues`;
+  }
+  function backLabel(): string {
+    let layout = "list";
+    try {
+      const raw = localStorage.getItem(`lific:list:layout:${projectIdentifier}`);
+      if (raw === "board" || raw === "list") layout = raw;
+    } catch {
+      // ignore
+    }
+    return layout === "board" ? "Board" : "Issues";
+  }
+
   let issue = $state<Issue | null>(null);
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
@@ -162,7 +188,7 @@
     }
     if (editingTitle || editingDescription || statusOpen || priorityOpen || moduleOpen || labelsOpen || menuOpen) return;
     e.preventDefault();
-    navigate(`/${projectIdentifier}/issues`);
+    navigate(backRoute());
   }
 
   // Close all dropdowns on outside click
@@ -182,7 +208,7 @@
     deleting = true;
     const res = await deleteIssue(issue.id);
     if (res.ok) {
-      navigate(`/${projectIdentifier}/issues`);
+      navigate(backRoute());
     } else {
       deleting = false;
       confirmingDelete = false;
@@ -372,9 +398,9 @@
     <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
     <button
       class="text-[0.8125rem] text-[var(--accent)] hover:underline"
-      onclick={() => navigate(`/${projectIdentifier}/issues`)}
+      onclick={() => navigate(backRoute())}
     >
-      Back to issues
+      Back to {backLabel().toLowerCase()}
     </button>
   </div>
 {:else if issue}
@@ -388,10 +414,10 @@
         class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
                hover:bg-[var(--bg-subtle)]"
-        onclick={() => navigate(`/${projectIdentifier}/issues`)}
+        onclick={() => navigate(backRoute())}
       >
         <ArrowLeft size={14} />
-        Issues
+        {backLabel()}
       </button>
 
       <span class="text-[var(--text-faint)]">/</span>

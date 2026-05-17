@@ -103,16 +103,86 @@
     }
   }
 
+  // ── Persisted list/board view state ──────────────────
+  // Filters, search, and sort are remembered per-project so navigating
+  // away (e.g. into an issue detail) and back doesn't reset the view.
+  // Layout (list vs board) is remembered too so IssueDetail's back arrow
+  // knows where to send the user.
+  function storageKeyForState(id: string) {
+    return `lific:list:state:${id}`;
+  }
+  function storageKeyForLayout(id: string) {
+    return `lific:list:layout:${id}`;
+  }
+
+  type PersistedListState = {
+    filterStatus?: string;
+    filterPriority?: string;
+    filterLabel?: string;
+    filterModule?: string;
+    searchQuery?: string;
+    sortField?: SortField;
+    sortDir?: SortDir;
+  };
+
+  let stateHydrated = $state(false);
+
   // Re-run when the project prop changes (read it synchronously so Svelte tracks it)
   $effect(() => {
     const id = projectIdentifier;
-    // Reset filters when switching projects
-    filterStatus = "";
-    filterPriority = "";
-    filterLabel = "";
-    filterModule = "";
-    searchQuery = "";
+    stateHydrated = false;
+    // Hydrate filters/sort/search from localStorage (per-project) so going
+    // back from an issue detail preserves the view. Fall back to empty
+    // defaults if nothing is stored or storage is unavailable.
+    let s: PersistedListState = {};
+    try {
+      const raw = localStorage.getItem(storageKeyForState(id));
+      if (raw) s = JSON.parse(raw) as PersistedListState;
+    } catch {
+      // ignore
+    }
+    filterStatus = s.filterStatus ?? "";
+    filterPriority = s.filterPriority ?? "";
+    filterLabel = s.filterLabel ?? "";
+    filterModule = s.filterModule ?? "";
+    searchQuery = s.searchQuery ?? "";
+    if (s.sortField) sortField = s.sortField;
+    if (s.sortDir) sortDir = s.sortDir;
+    stateHydrated = true;
     loadProject(id);
+  });
+
+  // Remember which layout the user is on so IssueDetail's back arrow
+  // returns to the right route (/board vs /issues).
+  $effect(() => {
+    const id = projectIdentifier;
+    const l = layout;
+    try {
+      localStorage.setItem(storageKeyForLayout(id), l);
+    } catch {
+      // ignore
+    }
+  });
+
+  // Persist filter/sort/search state on change. Gated on stateHydrated
+  // to avoid clobbering storage with defaults during the hydrate pass.
+  $effect(() => {
+    const id = projectIdentifier;
+    const snapshot: PersistedListState = {
+      filterStatus,
+      filterPriority,
+      filterLabel,
+      filterModule,
+      searchQuery,
+      sortField,
+      sortDir,
+    };
+    if (!stateHydrated) return;
+    try {
+      localStorage.setItem(storageKeyForState(id), JSON.stringify(snapshot));
+    } catch {
+      // ignore
+    }
   });
 
   // Reload issues when filters change
