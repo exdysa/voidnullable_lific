@@ -40,7 +40,15 @@
   >
     <div></div>
     <div class="animate-reveal delay-150">
-      <img src="/logo.webp" alt="Lific" width="128" height="128" class="mb-6" />
+      <a
+        href="https://github.com/VoidNullable/lific"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="View Lific on GitHub"
+        class="inline-block mb-6 hover:opacity-80 transition-opacity"
+      >
+        <img src="/logo.webp" alt="Lific" width="128" height="128" />
+      </a>
       <h1 class="font-display text-[clamp(2.5rem,5vw,3.5rem)] leading-[1.1] tracking-tight text-[var(--panel-text)] mb-4">
         Lific
       </h1>
@@ -60,7 +68,15 @@
     <div class="w-full max-w-[360px] animate-reveal delay-300">
 
       <div class="md:hidden flex items-center gap-3 mb-6">
-        <img src="/logo.webp" alt="Lific" width="40" height="40" />
+        <a
+          href="https://github.com/VoidNullable/lific"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="View Lific on GitHub"
+          class="inline-block hover:opacity-80 transition-opacity"
+        >
+          <img src="/logo.webp" alt="Lific" width="40" height="40" />
+        </a>
         <h1 class="font-display text-2xl text-[var(--text)]">Lific</h1>
       </div>
 

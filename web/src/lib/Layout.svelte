@@ -122,7 +122,13 @@
              bg-[var(--chrome)] select-none overflow-y-auto"
     >
       <!-- Brand -->
-      <div class="flex items-baseline gap-2.5 px-4 py-3">
+      <a
+        href="https://github.com/VoidNullable/lific"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Lific v{__APP_VERSION__} — view on GitHub"
+        class="flex items-baseline gap-2.5 px-4 py-3 hover:opacity-80 transition-opacity"
+      >
         <img
           src="/logo.webp"
           alt=""
@@ -135,11 +141,10 @@
         </span>
         <span
           class="font-mono text-[0.6875rem] tracking-tight text-[var(--text-faint)]"
-          title="Lific v{__APP_VERSION__}"
         >
           [v{__APP_VERSION__}]
         </span>
-      </div>
+      </a>
 
       <!-- Navigation -->
       <nav class="flex-1 py-2 overflow-y-auto">
