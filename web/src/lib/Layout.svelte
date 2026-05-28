@@ -122,11 +122,18 @@
              bg-[var(--chrome)] select-none overflow-y-auto"
     >
       <!-- Brand -->
-      <div class="flex items-center gap-2.5 px-4 py-3">
+      <div class="flex items-center gap-2.5 px-4 pt-3 pb-0.5">
         <img src="/logo.webp" alt="" width="24" height="24" />
         <span class="font-display text-lg tracking-tight text-[var(--text)]">
           Lific
         </span>
+      </div>
+      <div
+        class="px-4 pb-3 pl-[2.625rem] text-[0.6875rem] font-mono
+               tracking-wide text-[var(--text-faint)]"
+        title="Lific v{__APP_VERSION__}"
+      >
+        v{__APP_VERSION__}
       </div>
 
       <!-- Navigation -->
