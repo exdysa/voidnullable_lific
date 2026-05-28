@@ -156,6 +156,22 @@ jobs:
             binaries/lific-macos-aarch64 \
             binaries/sha256sums.txt
 
+      # Work around a gh draft-fallback bug (LIF-120): when `gh release
+      # create` cannot confidently bind the just-pushed tag to the new
+      # release at API-call time (a read-side propagation race), it
+      # silently falls back to creating a *draft*. `--latest` is recorded
+      # but is a no-op until the release is non-draft, so it sits drafted
+      # forever (this stranded v1.2.0 through v1.3.1). Re-asserting the
+      # published state here is idempotent and fixes it regardless of the
+      # underlying gh quirk.
+      - name: Publish release (force non-draft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ needs.detect.outputs.tag }}" \
+            --draft=false \
+            --latest
+
   publish:
     needs: [detect, release]
     if: needs.detect.outputs.changed == 'true'
