@@ -1096,7 +1096,12 @@
         {/if}
       </div>
 
-      <!-- Display options button (Group/Density — wired in sub-phase 1b). -->
+      <!-- Display options button — HIDDEN for v1.4 (LIF-104).
+           The popover only ever held a "coming soon" placeholder, which read
+           as a broken control to users. Grouping/density is now tracked as a
+           feature; drop this {#if false} to re-enable the button when it ships.
+           Kept (not deleted) so the scaffolding is here for that work. -->
+      {#if false}
       <div class="relative">
         <Tooltip content={displayOpen ? null : "Display options"} placement="bottom">
           <button
@@ -1127,6 +1132,7 @@
           </div>
         {/if}
       </div>
+      {/if}
 
       <!-- Search: collapsed to icon, expands inline on click or `/`. -->
       {#if searchExpanded}
