@@ -262,23 +262,22 @@
   }
 
   // LIF-119: fuzzy full-text search across title, identifier, and
-  // description. Stores per-issue score + optional content snippet in
-  // a Map so the comparator (for score-based ordering) and the row
-  // renderer (for snippet display) can both reach it without a second
-  // scoring pass.
+  // description. We compute the filtered set AND the per-issue score map
+  // in a single derived so we never have to write a $state from inside
+  // a $derived (Svelte's state_unsafe_mutation guard). Downstream code
+  // reads `filteredIssues` and `issueSearchScores` as derived projections
+  // of this one result.
   interface SearchHit {
     score: number;
     snippet: string | null;
   }
-  let issueSearchScores = $state<Map<number, SearchHit>>(new Map());
 
-  let filteredIssues = $derived.by<Issue[]>(() => {
+  let searchResult = $derived.by<{
+    issues: Issue[];
+    scores: Map<number, SearchHit>;
+  }>(() => {
     const q = searchQuery.trim();
-    if (!q) {
-      // Reset the score map so compareIssues falls back to user sort.
-      if (issueSearchScores.size > 0) issueSearchScores = new Map();
-      return issues;
-    }
+    if (!q) return { issues, scores: new Map() };
 
     const scores = new Map<number, SearchHit>();
     const hits: Array<{ issue: Issue; score: number }> = [];
@@ -308,16 +307,18 @@
     hits.sort((a, b) => b.score - a.score);
     const capped = hits.slice(0, RESULT_CAP);
 
-    // Keep the score map in sync with what we actually surface so
-    // dropped (over-cap) items don't get spurious relevance ordering.
+    // Drop scores for issues that fell off the result cap so the
+    // comparator doesn't grant relevance ordering to invisible rows.
     const capIds = new Set(capped.map((h) => h.issue.id));
-    for (const id of scores.keys()) {
+    for (const id of [...scores.keys()]) {
       if (!capIds.has(id)) scores.delete(id);
     }
-    issueSearchScores = scores;
 
-    return capped.map((h) => h.issue);
+    return { issues: capped.map((h) => h.issue), scores };
   });
+
+  let filteredIssues = $derived(searchResult.issues);
+  let issueSearchScores = $derived(searchResult.scores);
 
   // ── Sort ────────────────────────────────────────────
   // Topbar-controlled ordering. Applied after filter, before grouping —
