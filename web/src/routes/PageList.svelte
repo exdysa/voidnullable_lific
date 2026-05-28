@@ -21,8 +21,10 @@
     ChevronRight,
     Trash2,
     X,
+    Search,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
+  import Tooltip from "../lib/Tooltip.svelte";
 
   let {
     navigate,
@@ -54,6 +56,34 @@
   // LIF-105: server-side label filter. Empty string = no filter (mirrors
   // the issue list's filterLabel convention).
   let filterLabel = $state("");
+
+  // LIF-117: client-side search. Mirrors IssueList's pattern — a collapsed
+  // icon in the toolbar expands to an input on click, and filters the
+  // already-loaded pages by title/identifier substring. When active, the
+  // tree is replaced by a flat result list (folders become irrelevant in
+  // a search context).
+  let searchQuery = $state("");
+  let searchExpanded = $state(false);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+
+  let filteredPages = $derived.by(() => {
+    if (!searchQuery.trim()) return [] as Page[];
+    const q = searchQuery.toLowerCase();
+    return pages.filter(
+      (p) =>
+        p.title.toLowerCase().includes(q) ||
+        p.identifier.toLowerCase().includes(q),
+    );
+  });
+
+  function openSearch() {
+    searchExpanded = true;
+    requestAnimationFrame(() => searchInputEl?.focus());
+  }
+
+  function maybeCollapseSearch() {
+    if (!searchQuery) searchExpanded = false;
+  }
 
   let labelOptions = $derived([
     { value: "", label: "Label" },
@@ -335,6 +365,48 @@
     <!-- Spacer -->
     <div class="flex-1"></div>
 
+    <!-- LIF-117: search. Collapsed-to-icon, expands inline on click. -->
+    {#if searchExpanded}
+      <div class="relative shrink-0">
+        <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
+          <Search size={12} />
+        </div>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          type="text"
+          placeholder="Search pages..."
+          bind:this={searchInputEl}
+          bind:value={searchQuery}
+          onblur={maybeCollapseSearch}
+          onkeydown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              searchQuery = "";
+              searchExpanded = false;
+              (e.currentTarget as HTMLInputElement).blur();
+            }
+          }}
+          class="w-[200px] pl-7 pr-2 py-1 text-[0.8125rem] rounded-md
+                 border border-[var(--border)] bg-[var(--surface)]
+                 text-[var(--text)] placeholder:text-[var(--text-faint)]
+                 focus:border-[var(--accent)]
+                 focus:shadow-[0_0_0_3px_var(--accent-subtle)]
+                 outline-none transition-colors"
+        />
+      </div>
+    {:else}
+      <Tooltip content="Search" placement="bottom">
+        <button
+          class="size-7 flex items-center justify-center rounded-md
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors shrink-0"
+          onclick={(e) => { e.stopPropagation(); openSearch(); }}
+        >
+          <Search size={14} />
+        </button>
+      </Tooltip>
+    {/if}
+
     <!-- Actions -->
     <div class="flex items-center gap-1.5 shrink-0">
       <button
@@ -397,6 +469,61 @@
         >
           Create the first page
         </button>
+      </div>
+    {:else if searchQuery.trim()}
+      <!-- LIF-117: flat search results. Folders are omitted in this mode
+           because the user is looking for a specific page by name; the
+           tree structure would just be visual noise. -->
+      <div class="px-6 py-4">
+        {#if filteredPages.length === 0}
+          <div class="flex flex-col items-center py-16 gap-3">
+            <Search size={28} class="text-[var(--text-faint)]" />
+            <p class="text-[0.9375rem] text-[var(--text-muted)]">
+              No pages match "{searchQuery}"
+            </p>
+            <button
+              class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+              onclick={() => { searchQuery = ""; searchExpanded = false; }}
+            >
+              Clear search
+            </button>
+          </div>
+        {:else}
+          {#each filteredPages as page (page.id)}
+            <button
+              class="w-full flex items-center gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
+                     text-left group transition-colors hover:bg-[var(--bg-subtle)]"
+              onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
+            >
+              <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
+              <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
+                {page.title}
+              </span>
+              <span class="text-[0.75rem] font-mono text-[var(--text-faint)] shrink-0">
+                {page.identifier}
+              </span>
+              {#if page.labels.length > 0}
+                <div class="flex items-center gap-1 shrink-0">
+                  {#each page.labels.slice(0, 2) as lbl}
+                    {@const labelObj = labels.find((l) => l.name === lbl)}
+                    <span
+                      class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
+                             border border-[var(--border)]"
+                      style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+                    >
+                      {lbl}
+                    </span>
+                  {/each}
+                  {#if page.labels.length > 2}
+                    <span class="text-[0.6875rem] text-[var(--text-faint)]">
+                      +{page.labels.length - 2}
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+            </button>
+          {/each}
+        {/if}
       </div>
     {:else}
       <div class="px-6 py-4">
