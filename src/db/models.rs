@@ -197,6 +197,8 @@ pub struct Page {
     pub title: String,
     pub content: String,
     pub sort_order: f64,
+    /// LIF-112: lifecycle status — one of draft/active/complete/archived.
+    pub status: String,
     pub created_at: String,
     pub updated_at: String,
     /// Labels attached to this page (populated on read). Empty for
@@ -212,6 +214,9 @@ pub struct CreatePage {
     pub title: String,
     #[serde(default)]
     pub content: String,
+    /// LIF-112: lifecycle status. Defaults to "draft".
+    #[serde(default = "default_page_status")]
+    pub status: String,
     /// Label names to attach. Silently ignored for workspace pages (no
     /// project_id), since labels are project-scoped (LIF-105).
     #[serde(default)]
@@ -226,10 +231,16 @@ pub struct UpdatePage {
     #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
     pub folder_id: Option<Option<i64>>,
     pub sort_order: Option<f64>,
+    /// LIF-112: lifecycle status. None = don't change.
+    pub status: Option<String>,
     /// Replace the full label set. None = don't touch, Some(vec) = replace
     /// (delete-all + insert-by-name, mirroring `UpdateIssue`). Silently
     /// no-ops for workspace pages.
     pub labels: Option<Vec<String>>,
+}
+
+fn default_page_status() -> String {
+    "draft".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

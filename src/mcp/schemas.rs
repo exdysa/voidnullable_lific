@@ -118,6 +118,8 @@ pub struct CreatePageInput {
     pub content: Option<String>,
     #[schemars(description = "Folder name to place page in")]
     pub folder: Option<String>,
+    #[schemars(description = "Status: draft, active, complete, archived")]
+    pub status: Option<String>,
     #[schemars(
         description = "Label names to attach. Labels are project-scoped, so this is ignored on workspace pages (LIF-105)."
     )]
@@ -134,6 +136,8 @@ pub struct UpdatePageInput {
     pub content: Option<String>,
     #[schemars(description = "Move to folder name")]
     pub folder: Option<String>,
+    #[schemars(description = "Status: draft, active, complete, archived")]
+    pub status: Option<String>,
     #[schemars(
         description = "Replace labels. Pass [] to clear all. Labels are project-scoped (LIF-105)."
     )]

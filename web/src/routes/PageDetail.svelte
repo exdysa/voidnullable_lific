@@ -13,7 +13,32 @@
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
+  import Select from "../lib/Select.svelte";
   import { formatDate } from "../lib/format";
+  import {
+    PenLine,
+    CircleDot,
+    CheckCircle2,
+    Archive,
+  } from "lucide-svelte";
+
+  // LIF-112: page lifecycle statuses. Icon + label per value, used by
+  // the status picker in the belowTitle strip.
+  const PAGE_STATUSES = [
+    { value: "draft", label: "Draft", icon: PenLine },
+    { value: "active", label: "Active", icon: CircleDot },
+    { value: "complete", label: "Complete", icon: CheckCircle2 },
+    { value: "archived", label: "Archived", icon: Archive },
+  ] as const;
+
+  const statusOptions = PAGE_STATUSES.map((s) => ({
+    value: s.value,
+    label: s.label,
+  }));
+
+  function statusMeta(value: string) {
+    return PAGE_STATUSES.find((s) => s.value === value) ?? PAGE_STATUSES[0];
+  }
 
   let {
     navigate,
@@ -100,6 +125,36 @@
     }
   }
 
+  // LIF-112: persist a lifecycle status change. The Select binds to a
+  // local mirror so the dropdown reflects the new value immediately. The
+  // effect below syncs the mirror down from the loaded page, and persists
+  // up when the user picks a different value — `lastStatus` guards against
+  // the load-sync re-triggering a save.
+  let statusValue = $state("draft");
+  let lastStatus = $state("draft");
+  $effect(() => {
+    // Sync down whenever the loaded page's status changes (page switch
+    // or server refresh). Update lastStatus together so the persistence
+    // branch doesn't fire on this server-driven change.
+    const serverStatus = page?.status ?? "draft";
+    if (serverStatus !== lastStatus && serverStatus !== statusValue) {
+      statusValue = serverStatus;
+      lastStatus = serverStatus;
+    }
+  });
+  $effect(() => {
+    // Persist up when the user picks a new value via the Select.
+    if (statusValue !== lastStatus) {
+      lastStatus = statusValue;
+      saveStatus(statusValue);
+    }
+  });
+
+  async function saveStatus(next: string) {
+    if (!page || next === page.status) return;
+    await saveField("status", next);
+  }
+
   // LIF-105: toggle a label name on/off, then persist the full set
   // (backend does delete-all + reinsert, so we send the entire array).
   async function toggleLabel(name: string) {
@@ -171,23 +226,58 @@
   layout="wide"
 >
   {#snippet belowTitle()}
-    <!-- LIF-105: labels strip. Sits between title and body, mirroring
-         the issue sidebar's chip+picker UX but laid out horizontally
-         since pages have no sidebar. Workspace pages skip it entirely —
-         labels are project-scoped. -->
-    {#if page && page.project_id !== null}
-      <div class="mb-6">
-        <LabelEditor
-          attached={page.labels}
-          all={labels}
-          {editable}
-          onToggle={toggleLabel}
-          emptyText="No labels"
-          emptyItalic
-          hideEmptyWhenEditable
-          popoverWidth="w-[200px]"
-          emptyPickerText="No labels defined in this project."
-        />
+    <!-- LIF-112 + LIF-105: lifecycle status picker and labels strip. Both
+         sit between title and body, mirroring the issue sidebar's UX but
+         laid out horizontally since pages have no sidebar. -->
+    {#if page}
+      <div class="mb-6 flex flex-wrap items-center gap-4">
+        <!-- LIF-112: status picker. Available for every page (workspace
+             pages included — status isn't project-scoped). -->
+        {#if editable}
+          <Select
+            options={statusOptions}
+            bind:value={statusValue}
+            size="sm"
+            class="w-auto"
+          >
+            {#snippet renderSelected(opt)}
+              {@const meta = statusMeta(String(opt.value))}
+              <span class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text)]">
+                <meta.icon size={13} class="shrink-0 text-[var(--text-muted)]" />
+                {meta.label}
+              </span>
+            {/snippet}
+            {#snippet renderOption(opt, isSelected)}
+              {@const meta = statusMeta(String(opt.value))}
+              <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+                <meta.icon size={13} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
+                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{meta.label}</span>
+              </span>
+            {/snippet}
+          </Select>
+        {:else}
+          {@const meta = statusMeta(page.status)}
+          <span class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text-muted)]">
+            <meta.icon size={13} class="shrink-0" />
+            {meta.label}
+          </span>
+        {/if}
+
+        <!-- LIF-105: labels strip. Workspace pages skip it — labels are
+             project-scoped. -->
+        {#if page.project_id !== null}
+          <LabelEditor
+            attached={page.labels}
+            all={labels}
+            {editable}
+            onToggle={toggleLabel}
+            emptyText="No labels"
+            emptyItalic
+            hideEmptyWhenEditable
+            popoverWidth="w-[200px]"
+            emptyPickerText="No labels defined in this project."
+          />
+        {/if}
       </div>
     {/if}
   {/snippet}

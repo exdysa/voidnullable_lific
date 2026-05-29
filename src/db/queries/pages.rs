@@ -23,14 +23,15 @@ fn page_from_row(row: &rusqlite::Row) -> rusqlite::Result<Page> {
         title: row.get(5)?,
         content: row.get(6)?,
         sort_order: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
         labels: Vec::new(),
     })
 }
 
 const PAGE_SELECT: &str = "SELECT pg.id, pg.project_id, pg.sequence, p.identifier,
-            pg.folder_id, pg.title, pg.content, pg.sort_order,
+            pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
             pg.created_at, pg.updated_at
      FROM pages pg
      LEFT JOIN projects p ON p.id = pg.project_id";
@@ -88,6 +89,7 @@ pub fn list_pages(
     project_id: Option<i64>,
     folder_id: Option<i64>,
     label: Option<&str>,
+    status: Option<&str>,
 ) -> Result<Vec<Page>, LificError> {
     // Build the query incrementally so the optional label filter can
     // graft on a JOIN. Using DISTINCT shields against a page joining
@@ -96,7 +98,7 @@ pub fn list_pages(
     // DISTINCT keeps the query robust to future joins).
     let mut sql = String::from(
         "SELECT DISTINCT pg.id, pg.project_id, pg.sequence, p.identifier,
-                pg.folder_id, pg.title, pg.content, pg.sort_order,
+                pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
                 pg.created_at, pg.updated_at
          FROM pages pg
          LEFT JOIN projects p ON p.id = pg.project_id",
@@ -126,6 +128,11 @@ pub fn list_pages(
         );
         conditions.push(format!("l.name = ?{}", param_values.len() + 1));
         param_values.push(Box::new(label_name.to_string()));
+    }
+
+    if let Some(status_filter) = status {
+        conditions.push(format!("pg.status = ?{}", param_values.len() + 1));
+        param_values.push(Box::new(status_filter.to_string()));
     }
 
     if !conditions.is_empty() {
@@ -218,8 +225,8 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
     // before the label inserts).
     let id = super::savepoint(conn, "create_page", || {
         conn.execute(
-            "INSERT INTO pages (project_id, folder_id, title, content, sequence) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![input.project_id, input.folder_id, input.title, unescape_text(&input.content), next_seq],
+            "INSERT INTO pages (project_id, folder_id, title, content, sequence, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![input.project_id, input.folder_id, input.title, unescape_text(&input.content), next_seq, input.status],
         )?;
         let id = conn.last_insert_rowid();
 
@@ -266,6 +273,12 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
             conn.execute(
                 "UPDATE pages SET sort_order = ?1 WHERE id = ?2",
                 params![sort_order, id],
+            )?;
+        }
+        if let Some(ref status) = input.status {
+            conn.execute(
+                "UPDATE pages SET status = ?1 WHERE id = ?2",
+                params![status, id],
             )?;
         }
         if let Some(ref labels) = input.labels {
@@ -347,6 +360,7 @@ mod tests {
             folder_id: None,
             title: title.into(),
             content: String::new(),
+            status: "draft".into(),
             labels: vec![],
         }
     }
@@ -425,6 +439,7 @@ mod tests {
                 folder_id: None,
                 title: "Original".into(),
                 content: "# Hello".into(),
+                status: "draft".into(),
                 labels: vec![],
             },
         )
@@ -440,6 +455,7 @@ mod tests {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                status: None,
                 labels: None,
             },
         )
@@ -464,6 +480,7 @@ mod tests {
                 folder_id: None,
                 title: "Escaped".into(),
                 content: "# Title\\n\\nParagraph".into(),
+                status: "draft".into(),
                 labels: vec![],
             },
         )
@@ -488,6 +505,7 @@ mod tests {
                 folder_id: None,
                 title: "Spec".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["design".into(), "draft".into()],
             },
         )
@@ -515,6 +533,7 @@ mod tests {
                 folder_id: None,
                 title: "Spec".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["design".into(), "phantom".into()],
             },
         )
@@ -539,6 +558,7 @@ mod tests {
                 folder_id: None,
                 title: "P".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["old".into()],
             },
         )
@@ -553,6 +573,7 @@ mod tests {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                status: None,
                 labels: Some(vec!["new".into()]),
             },
         )
@@ -574,6 +595,7 @@ mod tests {
                 folder_id: None,
                 title: "P".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["x".into()],
             },
         )
@@ -588,6 +610,7 @@ mod tests {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                status: None,
                 labels: Some(vec![]),
             },
         )
@@ -611,6 +634,7 @@ mod tests {
                 folder_id: None,
                 title: "P".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["keep".into()],
             },
         )
@@ -624,6 +648,7 @@ mod tests {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                status: None,
                 labels: None,
             },
         )
@@ -647,6 +672,7 @@ mod tests {
                 folder_id: None,
                 title: "Workspace doc".into(),
                 content: String::new(),
+                status: "draft".into(),
                 // These labels can't exist in any project scope here, so
                 // even if we tried to attach them the lookup would miss.
                 labels: vec!["anything".into()],
@@ -671,6 +697,7 @@ mod tests {
                 folder_id: None,
                 title: "One".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["a".into()],
             },
         )
@@ -682,12 +709,13 @@ mod tests {
                 folder_id: None,
                 title: "Two".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["a".into(), "b".into()],
             },
         )
         .unwrap();
 
-        let pages = list_pages(&conn, Some(pid), None, None).unwrap();
+        let pages = list_pages(&conn, Some(pid), None, None, None).unwrap();
         let by_title: std::collections::HashMap<_, _> =
             pages.into_iter().map(|p| (p.title.clone(), p)).collect();
         assert_eq!(by_title["One"].labels, vec!["a".to_string()]);
@@ -711,13 +739,14 @@ mod tests {
                 folder_id: None,
                 title: "Designy".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["design".into()],
             },
         )
         .unwrap();
         create_page(&conn, &blank_page(Some(pid), "Plain")).unwrap();
 
-        let filtered = list_pages(&conn, Some(pid), None, Some("design")).unwrap();
+        let filtered = list_pages(&conn, Some(pid), None, Some("design"), None).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Designy");
     }
@@ -738,6 +767,7 @@ mod tests {
                 folder_id: None,
                 title: "P".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["doomed".into()],
             },
         )
@@ -765,6 +795,7 @@ mod tests {
                 folder_id: None,
                 title: "P".into(),
                 content: String::new(),
+                status: "draft".into(),
                 labels: vec!["x".into()],
             },
         )
@@ -779,5 +810,147 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── LIF-112: page status (lifecycle) ─────────────────────
+
+    #[test]
+    fn create_page_defaults_to_draft_status() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        let page = create_page(&conn, &blank_page(Some(pid), "Fresh")).unwrap();
+        assert_eq!(page.status, "draft");
+    }
+
+    #[test]
+    fn create_page_honors_explicit_status() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        let page = create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "Active doc".into(),
+                content: String::new(),
+                status: "active".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(page.status, "active");
+    }
+
+    #[test]
+    fn update_page_transitions_status() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        let page = create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
+        assert_eq!(page.status, "draft");
+
+        let updated = update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: None,
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: Some("complete".into()),
+                labels: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.status, "complete");
+    }
+
+    #[test]
+    fn update_page_without_status_leaves_it_alone() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        let page = create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "P".into(),
+                content: String::new(),
+                status: "active".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+
+        let updated = update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: Some("Renamed".into()),
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                labels: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.status, "active");
+    }
+
+    #[test]
+    fn list_pages_filters_by_status() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        create_page(&conn, &blank_page(Some(pid), "Drafty")).unwrap();
+        create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "Archived doc".into(),
+                content: String::new(),
+                status: "archived".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+
+        let archived = list_pages(&conn, Some(pid), None, None, Some("archived")).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].title, "Archived doc");
+
+        let drafts = list_pages(&conn, Some(pid), None, None, Some("draft")).unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].title, "Drafty");
+    }
+
+    #[test]
+    fn invalid_status_rejected_by_check_constraint() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+
+        let result = create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "Bad".into(),
+                content: String::new(),
+                status: "bogus".into(),
+                labels: vec![],
+            },
+        );
+        assert!(result.is_err());
     }
 }

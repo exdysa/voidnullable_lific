@@ -12,6 +12,9 @@ pub(super) struct PageQuery {
     /// LIF-105: filter pages by label name. Mirrors `?label=` on the
     /// issue list endpoint.
     label: Option<String>,
+    /// LIF-112: filter pages by lifecycle status. Mirrors `?status=` on
+    /// the issue list endpoint.
+    status: Option<String>,
 }
 
 pub(super) async fn list_pages_handler(
@@ -19,7 +22,13 @@ pub(super) async fn list_pages_handler(
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<Page>>, LificError> {
     with_read(&db, |conn| {
-        crate::db::queries::list_pages(conn, q.project_id, q.folder_id, q.label.as_deref())
+        crate::db::queries::list_pages(
+            conn,
+            q.project_id,
+            q.folder_id,
+            q.label.as_deref(),
+            q.status.as_deref(),
+        )
     })
     .map(Json)
 }
@@ -182,6 +191,69 @@ mod tests {
         let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["title"], "Designy");
+    }
+
+    #[tokio::test]
+    async fn list_pages_supports_status_filter() {
+        // LIF-112: mirrors the issues status-filter test. Create one
+        // draft (default) and one archived page, then verify ?status=
+        // narrows the list.
+        let app = test_app();
+        let (pid, _) = seed_project(&app).await;
+
+        json_post(
+            &app,
+            "/api/pages",
+            serde_json::json!({
+                "project_id": pid,
+                "title": "Drafty",
+            }),
+        )
+        .await;
+        json_post(
+            &app,
+            "/api/pages",
+            serde_json::json!({
+                "project_id": pid,
+                "title": "Archived doc",
+                "status": "archived",
+            }),
+        )
+        .await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/pages?project_id={pid}&status=archived"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["title"], "Archived doc");
+        assert_eq!(list[0]["status"], "archived");
+    }
+
+    #[tokio::test]
+    async fn create_page_defaults_status_to_draft() {
+        let app = test_app();
+        let (pid, _) = seed_project(&app).await;
+
+        let resp = json_post(
+            &app,
+            "/api/pages",
+            serde_json::json!({
+                "project_id": pid,
+                "title": "Fresh",
+            }),
+        )
+        .await;
+        let page = parse_json(resp).await;
+        assert_eq!(page["status"], "draft");
     }
 
     #[tokio::test]

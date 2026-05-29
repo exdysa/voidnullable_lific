@@ -570,6 +570,7 @@ impl LificMcp {
                     folder_id,
                     title: input.title.clone(),
                     content: input.content.clone().unwrap_or_default(),
+                    status: input.status.clone().unwrap_or_else(|| "draft".into()),
                     labels: input.labels.clone().unwrap_or_default(),
                 },
             )
@@ -603,6 +604,7 @@ impl LificMcp {
                     content: input.content.clone(),
                     folder_id: folder_id.map(Some),
                     sort_order: None,
+                    status: input.status.clone(),
                     labels: input.labels.clone(),
                 },
             )
@@ -653,6 +655,7 @@ impl LificMcp {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                status: None,
                 labels: None,
             };
             match field {
@@ -810,7 +813,8 @@ impl LificMcp {
                     _ => None,
                 };
                 let label = input.label.as_deref();
-                match self.read(|conn| queries::list_pages(conn, project_id, folder_id, label)) {
+                match self.read(|conn| queries::list_pages(conn, project_id, folder_id, label, None))
+                {
                     Ok(pages) if pages.is_empty() => "No pages found.".into(),
                     Ok(pages) => {
                         let mut out = format!("{} pages:\n", pages.len());
@@ -1695,6 +1699,7 @@ mod tests {
             title: "Design Doc".into(),
             content: Some("# Overview\nSome content".into()),
             folder: None,
+            status: None,
             labels: None,
         }));
         assert!(created.contains("PG-DOC-1"), "got: {created}");
@@ -1710,6 +1715,7 @@ mod tests {
             title: Some("Updated Doc".into()),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         assert!(updated.contains("Updated Doc"), "got: {updated}");
@@ -1723,6 +1729,7 @@ mod tests {
             title: "Global Note".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         assert!(created.contains("DOC-"), "got: {created}");
@@ -1737,6 +1744,7 @@ mod tests {
             title: "Temp".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         let result = m.delete(Parameters(DeleteInput {
@@ -2122,6 +2130,7 @@ mod tests {
             title: "Design".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         seed_user(&m);
@@ -2150,6 +2159,7 @@ mod tests {
             title: "A page".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         seed_user(&m);
@@ -2185,6 +2195,7 @@ mod tests {
             title: "Workspace note".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
         seed_user(&m);
@@ -2468,6 +2479,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("# Heading\nold body".into()),
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2496,6 +2508,7 @@ mod tests {
             title: "Draft Spec".into(),
             content: Some("body".into()),
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2531,6 +2544,7 @@ mod tests {
             title: "Original Title".into(),
             content: Some("change me".into()),
             folder: Some("Specs".into()),
+            status: None,
             labels: None,
         }));
 
@@ -2570,6 +2584,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("hello".into()),
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2593,6 +2608,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("body".into()),
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2637,6 +2653,7 @@ mod tests {
             title: "Spec".into(),
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["design".into()]),
         }));
         assert!(created.contains("PGL-DOC-1"), "got: {created}");
@@ -2657,6 +2674,7 @@ mod tests {
             title: "Spec".into(),
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["design".into()]),
         }));
 
@@ -2665,6 +2683,7 @@ mod tests {
             title: None,
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["draft".into()]),
         }));
 
@@ -2687,6 +2706,7 @@ mod tests {
             title: "Tagged".into(),
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["design".into()]),
         }));
         m.create_page(Parameters(CreatePageInput {
@@ -2694,6 +2714,7 @@ mod tests {
             title: "Bare".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2720,6 +2741,7 @@ mod tests {
             title: "Designy".into(),
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["design".into()]),
         }));
         m.create_page(Parameters(CreatePageInput {
@@ -2727,6 +2749,7 @@ mod tests {
             title: "Plain".into(),
             content: None,
             folder: None,
+            status: None,
             labels: None,
         }));
 
@@ -2753,6 +2776,7 @@ mod tests {
             title: "Floating".into(),
             content: None,
             folder: None,
+            status: None,
             labels: Some(vec!["anything".into()]),
         }));
         assert!(created.contains("DOC-1"), "got: {created}");

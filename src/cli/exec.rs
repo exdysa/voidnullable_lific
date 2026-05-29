@@ -417,7 +417,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                 None
             };
 
-            let pages = queries::list_pages(&conn, project_id, folder_id, label.as_deref())?;
+            let pages = queries::list_pages(&conn, project_id, folder_id, label.as_deref(), None)?;
 
             if json {
                 print_json(&pages);
@@ -507,6 +507,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     folder_id,
                     title: title.clone(),
                     content: content.clone(),
+                    status: "draft".into(),
                     labels: label_list,
                 },
             )?;
@@ -554,6 +555,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     content: content.clone(),
                     folder_id,
                     sort_order: None,
+                    status: None,
                     labels: label_list,
                 },
             )?;

@@ -484,6 +484,8 @@ export interface Page {
   title: string;
   content: string;
   sort_order: number;
+  /** LIF-112: lifecycle status — draft | active | complete | archived. */
+  status: string;
   created_at: string;
   updated_at: string;
   /** LIF-105: project-scoped labels attached to this page. Always [] for
@@ -503,10 +505,12 @@ export async function listPages(
   projectId: number,
   folderId?: number,
   label?: string,
+  status?: string,
 ) {
   const params = new URLSearchParams({ project_id: String(projectId) });
   if (folderId !== undefined) params.set("folder_id", String(folderId));
   if (label) params.set("label", label);
+  if (status) params.set("status", status);
   return request<Page[]>(`/pages?${params}`);
 }
 
@@ -519,6 +523,8 @@ export interface CreatePageInput {
   folder_id?: number;
   title: string;
   content?: string;
+  /** LIF-112: lifecycle status. Defaults to "draft" server-side. */
+  status?: string;
   /** LIF-105: label names to attach. Ignored on workspace pages. */
   labels?: string[];
 }
@@ -534,6 +540,8 @@ export interface UpdatePageInput {
   title?: string;
   content?: string;
   folder_id?: number | null;
+  /** LIF-112: lifecycle status. Omitted = no change. */
+  status?: string;
   /** LIF-105: replace the full label set. Pass [] to clear. Omitted = no change. */
   labels?: string[];
 }

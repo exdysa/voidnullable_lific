@@ -75,6 +75,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../../migrations/015_module_icon.sql"),
     ),
     (
+        16,
+        "page status",
+        include_str!("../../migrations/016_page_status.sql"),
+    ),
+    (
         17,
         "issue activity triggers",
         include_str!("../../migrations/017_issue_activity_triggers.sql"),

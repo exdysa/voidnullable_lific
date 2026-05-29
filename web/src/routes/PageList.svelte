@@ -22,6 +22,10 @@
     Trash2,
     X,
     Search,
+    PenLine,
+    CircleDot,
+    CheckCircle2,
+    Archive,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
@@ -94,6 +98,42 @@
   // the issue list's filterLabel convention).
   let filterLabel = $state("");
 
+  // LIF-112: lifecycle status. Picker icon + label per value, plus the
+  // status filter. The filter's default ("__active") hides archived
+  // pages; "" means show All (including archived).
+  const PAGE_STATUSES = [
+    { value: "draft", label: "Draft", icon: PenLine },
+    { value: "active", label: "Active", icon: CircleDot },
+    { value: "complete", label: "Complete", icon: CheckCircle2 },
+    { value: "archived", label: "Archived", icon: Archive },
+  ] as const;
+
+  function statusMeta(value: string) {
+    return PAGE_STATUSES.find((s) => s.value === value) ?? PAGE_STATUSES[0];
+  }
+
+  // Filter dropdown options. The leading entry is the default "hide
+  // archived" view (sentinel "__active"), then explicit "All", then one
+  // per concrete status.
+  const HIDE_ARCHIVED = "__active";
+  const statusFilterOptions = [
+    { value: HIDE_ARCHIVED, label: "Active" },
+    { value: "", label: "All" },
+    ...PAGE_STATUSES.map((s) => ({ value: s.value, label: s.label })),
+  ];
+
+  // Default to hiding archived pages.
+  let filterStatus = $state(HIDE_ARCHIVED);
+
+  // Pages after applying the client-side "hide archived" rule. When a
+  // concrete status filter is set the server already narrowed the list,
+  // so this only acts on the HIDE_ARCHIVED sentinel.
+  let visiblePages = $derived(
+    filterStatus === HIDE_ARCHIVED
+      ? pages.filter((p) => p.status !== "archived")
+      : pages,
+  );
+
   // LIF-117/118: client-side search. A collapsed icon in the toolbar
   // expands to an input on click, and fuzzy-scores the already-loaded
   // pages across title, identifier, and content. When active, the tree
@@ -164,13 +204,22 @@
     loadData(id);
   });
 
-  // Refetch pages when the label filter changes (matches the issue-list
-  // pattern of pushing every filter through the server, so it composes
-  // cleanly with later filters like folder).
+  // Refetch pages when the label or status filter changes (matches the
+  // issue-list pattern of pushing every filter through the server, so it
+  // composes cleanly with later filters like folder).
   $effect(() => {
     filterLabel;
+    filterStatus;
     if (project) reloadPages();
   });
+
+  // Map the filter selection to a concrete server-side status. The
+  // "hide archived" sentinel and "All" both mean "no server status
+  // filter" — archived hiding happens client-side via `visiblePages`.
+  function serverStatusFilter(): string | undefined {
+    if (filterStatus === HIDE_ARCHIVED || filterStatus === "") return undefined;
+    return filterStatus;
+  }
 
   async function loadData(ident: string) {
     loading = true;
@@ -182,7 +231,7 @@
     project = found;
 
     const [pRes, fRes, lRes] = await Promise.all([
-      listPages(found.id, undefined, filterLabel || undefined),
+      listPages(found.id, undefined, filterLabel || undefined, serverStatusFilter()),
       listFolders(found.id),
       listLabels(found.id),
     ]);
@@ -197,7 +246,12 @@
 
   async function reloadPages() {
     if (!project) return;
-    const res = await listPages(project.id, undefined, filterLabel || undefined);
+    const res = await listPages(
+      project.id,
+      undefined,
+      filterLabel || undefined,
+      serverStatusFilter(),
+    );
     if (res.ok) pages = res.data;
   }
 
@@ -207,7 +261,7 @@
   }
 
   function pagesInFolder(folderId: number | null): Page[] {
-    return pages.filter((p) => (p.folder_id ?? null) === folderId);
+    return visiblePages.filter((p) => (p.folder_id ?? null) === folderId);
   }
 
   function toggleFolder(id: number) {
@@ -425,6 +479,37 @@
       </div>
     {/if}
 
+    <!-- LIF-112: status filter. Defaults to "Active" (hides archived);
+         pick "All" to reveal archived pages, or a concrete status to
+         narrow. -->
+    <div class="flex items-center gap-1.5">
+      <Select
+        options={statusFilterOptions}
+        bind:value={filterStatus}
+        size="sm"
+        class="w-auto"
+      >
+        {#snippet renderSelected(opt)}
+          <span class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text)]">
+            {#if opt.value && opt.value !== HIDE_ARCHIVED}
+              {@const meta = statusMeta(String(opt.value))}
+              <meta.icon size={13} class="shrink-0 text-[var(--text-muted)]" />
+            {/if}
+            {opt.label}
+          </span>
+        {/snippet}
+        {#snippet renderOption(opt, isSelected)}
+          <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+            {#if opt.value && opt.value !== HIDE_ARCHIVED}
+              {@const meta = statusMeta(String(opt.value))}
+              <meta.icon size={13} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
+            {/if}
+            <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
+          </span>
+        {/snippet}
+      </Select>
+    </div>
+
     <!-- Right zone: search + create actions -->
     <div class="ml-auto flex items-center gap-1.5 shrink-0">
       <!-- LIF-117: search. Collapsed-to-icon, expands inline on click. -->
@@ -563,6 +648,7 @@
             </div>
           {/if}
           {#each filteredPages as hit (hit.page.id)}
+            {@const hMeta = statusMeta(hit.page.status)}
             <button
               class="w-full flex flex-col items-stretch gap-0.5 py-1.5 px-1.5 -mx-1.5 rounded-md
                      text-left group transition-colors hover:bg-[var(--bg-subtle)]"
@@ -575,6 +661,15 @@
                 </span>
                 <span class="text-[0.75rem] font-mono text-[var(--text-faint)] shrink-0">
                   {hit.page.identifier}
+                </span>
+                <span
+                  class="flex items-center gap-1 shrink-0 text-[0.6875rem] font-medium
+                         px-1.5 py-0.5 rounded-full border border-[var(--border)]
+                         text-[var(--text-muted)]"
+                  title={hMeta.label}
+                >
+                  <hMeta.icon size={11} class="shrink-0" />
+                  {hMeta.label}
                 </span>
                 {#if hit.page.labels.length > 0}
                   <div class="flex items-center gap-1 shrink-0">
@@ -705,6 +800,7 @@
   <!-- Pages at this level -->
   {#each subPages as page (page.id)}
     {@const isDragging = draggedId?.type === "page" && draggedId.id === page.id}
+    {@const sMeta = statusMeta(page.status)}
     <button
       class="w-full flex items-center gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
              text-left group transition-colors
@@ -718,6 +814,18 @@
       <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
       <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
         {page.title}
+      </span>
+
+      <!-- LIF-112: status badge. Icon + label, dimmed for non-active
+           lifecycle stages so the list reads at a glance. -->
+      <span
+        class="flex items-center gap-1 shrink-0 text-[0.6875rem] font-medium
+               px-1.5 py-0.5 rounded-full border border-[var(--border)]
+               text-[var(--text-muted)]"
+        title={sMeta.label}
+      >
+        <sMeta.icon size={11} class="shrink-0" />
+        {sMeta.label}
       </span>
 
       <!-- LIF-105: label chips. Up to 2 then a "+N" overflow, matching
