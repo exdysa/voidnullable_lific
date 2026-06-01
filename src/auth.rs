@@ -158,12 +158,36 @@ pub async fn require_api_key(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string());
 
+    // Targeted diagnostics for the MCP endpoint only (keeps REST traffic quiet).
+    // Lets us see, post-OAuth, whether Claude actually presents the bearer token
+    // it was issued — distinguishing a server-side token rejection from the
+    // documented claude.ai-web bug where the token is dropped and the
+    // authenticated /mcp request is never sent.
+    let is_mcp_request = request.uri().path() == "/mcp";
+    if is_mcp_request {
+        let token_kind = match token.as_deref() {
+            Some(t) if t.starts_with("lific_sess_") => "session",
+            Some(t) if t.starts_with("lific_at_") => "oauth",
+            Some(t) if t.starts_with("lific_sk") => "api_key",
+            Some(_) => "unknown",
+            None => "none",
+        };
+        info!(method = %request.method(), token_kind, "/mcp request received");
+    }
+
+    // RFC 9728 §3.1: for a resource URL with a path component (`/mcp`), the
+    // canonical protected-resource metadata lives at the path-aware well-known
+    // location. Point Claude there so the `resource` it reads matches the URL
+    // the user entered.
     let www_auth = format!(
-        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
         auth.public_url
     );
 
     let Some(token) = token else {
+        if is_mcp_request {
+            info!("/mcp rejected: no Authorization header (discovery probe or dropped token)");
+        }
         return (
             StatusCode::UNAUTHORIZED,
             [("WWW-Authenticate", www_auth.as_str())],
@@ -209,6 +233,9 @@ pub async fn require_api_key(
     // ── OAuth tokens (lific_at_ prefix) ──────────────────────────
     if token.starts_with("lific_at_") {
         if crate::oauth::validate_oauth_token(&auth.db, &token) {
+            if is_mcp_request {
+                info!("/mcp authorized: OAuth token accepted");
+            }
             // Resolve the user bound to this token at approval time (LIF-79).
             // Tokens issued before user binding existed have no user_id and
             // stay anonymous (None), preserving the previous behavior.
@@ -225,6 +252,9 @@ pub async fn require_api_key(
                 });
             request.extensions_mut().insert(auth_user);
             return next.run(request).await;
+        }
+        if is_mcp_request {
+            warn!("/mcp rejected: OAuth token invalid or expired");
         }
         return (
             StatusCode::UNAUTHORIZED,

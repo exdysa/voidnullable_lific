@@ -134,8 +134,16 @@ pub fn router(state: OAuthState) -> Router {
 // ── Discovery ────────────────────────────────────────────────────────────
 
 async fn protected_resource_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
+    // RFC 9728 / Claude connector requirement: the `resource` field MUST match
+    // the MCP server URL the user enters in Claude *including the path component*
+    // (`/mcp`). Claude derives the RFC 8707 audience from the URL it was given
+    // (`https://host/mcp`) and rejects the issued token if the protected-resource
+    // metadata advertises a different resource (e.g. the bare origin). Returning
+    // the bare issuer here is what surfaced as "Authorization with the MCP server
+    // failed" on claude.ai web even though the token exchange succeeded.
+    let resource = format!("{}/mcp", state.issuer.trim_end_matches('/'));
     Json(serde_json::json!({
-        "resource": state.issuer,
+        "resource": resource,
         "authorization_servers": [state.issuer],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"]
@@ -1067,6 +1075,39 @@ mod tests {
             !grants.iter().any(|g| g == "refresh_token"),
             "client registration should not default to refresh_token"
         );
+    }
+
+    // ── Protected-resource metadata advertises the /mcp resource ──
+    // Claude.ai derives the RFC 8707 audience from the MCP URL the user enters
+    // (`https://host/mcp`) and rejects the issued token if the protected-resource
+    // metadata's `resource` is the bare origin. Both the root and the path-aware
+    // well-known routes must advertise the path-qualified resource.
+    #[tokio::test]
+    async fn protected_resource_metadata_resource_includes_mcp_path() {
+        let (app, _) = test_oauth_app();
+        for path in [
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "path {path}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(val["resource"], "https://example.com/mcp", "path {path}");
+            assert_eq!(
+                val["authorization_servers"][0], "https://example.com",
+                "path {path}"
+            );
+        }
     }
 
     // ── LIF-50: token revocation ─────────────────────────────
