@@ -21,6 +21,7 @@ use axum::{
     response::IntoResponse,
     routing::{any, get},
 };
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use clap::Parser;
 use cli::{Cli, Command, KeyAction, UserAction};
@@ -61,9 +62,22 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
         let mime = mime_guess::from_path(path)
             .first_or_octet_stream()
             .to_string();
+        // Vite emits content-hashed filenames under assets/ (e.g.
+        // index-xkSiPCqs.js), so those are safe to cache forever — a new
+        // build changes the hash and thus the URL. Everything else
+        // (index.html, favicon) stays uncached so a redeploy is picked up
+        // immediately.
+        let cache_control = if path.starts_with("assets/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, mime)],
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, cache_control.to_string()),
+            ],
             file.data.to_vec(),
         )
             .into_response();
@@ -475,7 +489,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The internal CORS layer inside `api::router()` still runs for
                 // /api/* but is effectively shadowed by this outer one.
                 .layer(build_global_cors(&cfg.server.cors_origins))
-                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+                // Gzip/brotli compression for text responses. The embedded
+                // frontend ships a ~1 MB JS bundle that was previously served
+                // raw — uncompressed it took ~6-9s to transfer over the
+                // tailnet, blocking first paint (and everything behind it).
+                // CompressionLayer's DefaultPredicate already skips SSE
+                // (text/event-stream — so MCP streaming is untouched), gRPC,
+                // already-compressed images, and bodies under 32 bytes.
+                .layer(CompressionLayer::new());
 
             let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
