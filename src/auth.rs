@@ -99,22 +99,42 @@ pub fn revoke_api_key(db: &DbPool, name: &str) -> Result<(), crate::error::Lific
 }
 
 /// Rotate a key: delete the old one, create a new one, return the new plaintext.
+/// The old key's user binding carries over to the new key (LIF-132) — rotating
+/// a bot/user key must not silently de-attribute it.
 pub fn rotate_api_key(
     db: &DbPool,
     manager: &ApiKeyManagerV0,
     name: &str,
 ) -> Result<String, crate::error::LificError> {
-    // Delete old key entirely (not just revoke) so the name can be reused
+    // Capture the user binding before deleting so it can be re-applied.
+    // If multiple rows share the name (revoked leftovers), prefer the
+    // binding of an active row.
     let conn = db.write()?;
-    let changed = conn.execute("DELETE FROM api_keys WHERE name = ?1", params![name])?;
-    if changed == 0 {
-        return Err(crate::error::LificError::NotFound(format!(
-            "no key named '{name}'"
-        )));
-    }
+    let user_id: Option<i64> = conn
+        .query_row(
+            "SELECT user_id FROM api_keys WHERE name = ?1 ORDER BY revoked ASC, id DESC LIMIT 1",
+            params![name],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                crate::error::LificError::NotFound(format!("no key named '{name}'"))
+            }
+            other => other.into(),
+        })?;
+
+    // Delete old key entirely (not just revoke) so the name can be reused
+    conn.execute("DELETE FROM api_keys WHERE name = ?1", params![name])?;
     drop(conn);
 
-    create_api_key(db, manager, name)
+    let plaintext = create_api_key(db, manager, name)?;
+
+    if let Some(uid) = user_id {
+        let conn = db.write()?;
+        crate::db::queries::users::assign_key_to_user(&conn, name, uid)?;
+    }
+
+    Ok(plaintext)
 }
 
 /// Check if any API keys exist.
@@ -481,6 +501,65 @@ mod tests {
         let keys = list_api_keys(&pool).unwrap();
         assert_eq!(keys.len(), 1);
         assert!(!keys[0].revoked);
+    }
+
+    // LIF-132: rotation must carry the user binding over to the new key.
+    // Previously the old row was deleted (user_id and all) and the new key
+    // was created unbound, silently de-attributing bot/user keys.
+    #[test]
+    fn rotate_key_preserves_user_binding() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "bot-key").unwrap();
+
+        // Bind the key to a user.
+        let user_id = {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('bot', 'bot@test.local', 'x', 'Bot', 0, 1)",
+                [],
+            )
+            .unwrap();
+            let uid = conn.last_insert_rowid();
+            crate::db::queries::users::assign_key_to_user(&conn, "bot-key", uid).unwrap();
+            uid
+        };
+
+        rotate_api_key(&pool, &manager, "bot-key").unwrap();
+
+        let conn = pool.read().unwrap();
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT user_id FROM api_keys WHERE name = 'bot-key' AND revoked = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            bound,
+            Some(user_id),
+            "rotated key must keep its user binding"
+        );
+    }
+
+    // LIF-132: rotating an unbound key still works and stays unbound.
+    #[test]
+    fn rotate_unbound_key_stays_unbound() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "plain").unwrap();
+        rotate_api_key(&pool, &manager, "plain").unwrap();
+
+        let conn = pool.read().unwrap();
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT user_id FROM api_keys WHERE name = 'plain' AND revoked = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, None);
     }
 
     #[test]

@@ -65,12 +65,45 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
     })
 }
 
-pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Project, LificError> {
-    if input.identifier.len() > 5 {
+/// Validate a project identifier (LIF-134).
+///
+/// Identifiers are woven into issue (`LIF-42`) and page (`LIF-DOC-1`)
+/// identifiers, so the grammar must keep parsing unambiguous:
+/// - non-empty, at most 5 characters
+/// - uppercase ASCII letters and digits only, starting with a letter
+///   (a hyphen would break `resolve_identifier`, which splits at the
+///   first `-`; lowercase would make lookups case-sensitive surprises)
+/// - not the reserved word `DOC`, which marks page identifiers — a project
+///   named DOC would make its issues (`DOC-1`) indistinguishable from
+///   workspace pages
+fn validate_identifier(identifier: &str) -> Result<(), LificError> {
+    if identifier.is_empty() {
+        return Err(LificError::BadRequest("identifier must not be empty".into()));
+    }
+    if identifier.chars().count() > 5 {
         return Err(LificError::BadRequest(
             "identifier must be 5 characters or fewer".into(),
         ));
     }
+    let mut chars = identifier.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_uppercase());
+    let rest_ok = chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if !first_ok || !rest_ok {
+        return Err(LificError::BadRequest(
+            "identifier must be uppercase letters/digits starting with a letter (e.g. LIF, PRO2)"
+                .into(),
+        ));
+    }
+    if identifier == "DOC" {
+        return Err(LificError::BadRequest(
+            "identifier 'DOC' is reserved for page identifiers".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Project, LificError> {
+    validate_identifier(&input.identifier)?;
     conn.execute(
         "INSERT INTO projects (name, identifier, description, emoji, lead_user_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -99,11 +132,7 @@ pub fn update_project(
             )?;
         }
         if let Some(ref identifier) = input.identifier {
-            if identifier.len() > 5 {
-                return Err(LificError::BadRequest(
-                    "identifier must be 5 characters or fewer".into(),
-                ));
-            }
+            validate_identifier(identifier)?;
             conn.execute(
                 "UPDATE projects SET identifier = ?1 WHERE id = ?2",
                 params![identifier, id],
@@ -251,6 +280,76 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    // ── LIF-134: identifier grammar ──────────────────────────
+
+    fn try_create(conn: &Connection, ident: &str) -> Result<Project, LificError> {
+        create_project(
+            conn,
+            &CreateProject {
+                name: format!("P {ident}"),
+                identifier: ident.into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: None,
+            },
+        )
+    }
+
+    #[test]
+    fn identifier_rejects_malformed_values() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+
+        // Empty, lowercase, hyphenated (breaks resolve_identifier), leading
+        // digit, reserved page marker, >5 chars (counted in chars, not bytes).
+        for bad in ["", "lif", "A-B", "1AB", "DOC", "TOOLNG", "🧪🧪"] {
+            let result = try_create(&conn, bad);
+            assert!(
+                matches!(result, Err(LificError::BadRequest(_))),
+                "identifier {bad:?} must be rejected, got: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_accepts_uppercase_alphanumeric() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        for good in ["A", "LIF", "PRO2", "AB1C5"] {
+            assert!(
+                try_create(&conn, good).is_ok(),
+                "identifier {good:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn update_rejects_malformed_identifier() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = try_create(&conn, "GOOD").unwrap();
+
+        for bad in ["A-B", "DOC", "bad"] {
+            let result = update_project(
+                &conn,
+                project.id,
+                &UpdateProject {
+                    name: None,
+                    identifier: Some(bad.into()),
+                    description: None,
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            );
+            assert!(
+                matches!(result, Err(LificError::BadRequest(_))),
+                "identifier {bad:?} must be rejected on update, got: {result:?}"
+            );
+        }
+        // Unchanged after the failed updates.
+        assert_eq!(get_project(&conn, project.id).unwrap().identifier, "GOOD");
     }
 
     #[test]

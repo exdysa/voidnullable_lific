@@ -269,24 +269,31 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
         )
         .unwrap_or(1);
 
-    conn.execute(
-        "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            input.project_id, next_seq, input.title, unescape_text(&input.description),
-            input.status, input.priority, input.module_id, input.start_date, input.target_date,
-        ],
-    )?;
-    let id = conn.last_insert_rowid();
-
-    for label_name in &input.labels {
+    // LIF-130: wrap the issue INSERT + label inserts in a savepoint so a
+    // failed label attach can't leave a half-created issue behind. The id is
+    // captured inside the closure because `last_insert_rowid()` after the
+    // label loop would reflect the last issue_labels row, not the issue.
+    let id = super::savepoint(conn, "create_issue", || {
         conn.execute(
-            "INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
-             SELECT ?1, l.id FROM labels l
-             WHERE l.project_id = ?2 AND l.name = ?3",
-            params![id, input.project_id, label_name],
+            "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                input.project_id, next_seq, input.title, unescape_text(&input.description),
+                input.status, input.priority, input.module_id, input.start_date, input.target_date,
+            ],
         )?;
-    }
+        let id = conn.last_insert_rowid();
+
+        for label_name in &input.labels {
+            conn.execute(
+                "INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
+                 SELECT ?1, l.id FROM labels l
+                 WHERE l.project_id = ?2 AND l.name = ?3",
+                params![id, input.project_id, label_name],
+            )?;
+        }
+        Ok(id)
+    })?;
 
     get_issue(conn, id)
 }
@@ -383,6 +390,13 @@ pub fn link_issues(
         return Err(LificError::BadRequest(format!(
             "invalid relation type: {relation_type}"
         )));
+    }
+    // LIF-135: an issue relating to itself is never meaningful, and a
+    // self-"blocks" makes the issue permanently non-workable.
+    if source_id == target_id {
+        return Err(LificError::BadRequest(
+            "an issue cannot be linked to itself".into(),
+        ));
     }
     conn.execute(
         "INSERT OR IGNORE INTO issue_relations (source_id, target_id, relation_type) VALUES (?1, ?2, ?3)",
@@ -530,6 +544,50 @@ mod tests {
         assert_eq!(issue.labels.len(), 2);
         assert!(issue.labels.contains(&"bug".to_string()));
         assert!(issue.labels.contains(&"feature".to_string()));
+    }
+
+    // LIF-130: the issue INSERT and its label attaches are one atomic unit.
+    // If a label insert fails after the issue row is written, the savepoint
+    // must roll the issue back too — no half-created issues.
+    #[test]
+    fn create_issue_rolls_back_when_label_attach_fails() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_label(&conn, pid, "bug");
+
+        // Force the label attach to fail after the issue INSERT succeeds.
+        // RAISE(ABORT) in a trigger propagates even through INSERT OR IGNORE.
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_label_attach BEFORE INSERT ON issue_labels
+             BEGIN SELECT RAISE(ABORT, 'label attach forced to fail'); END;",
+        )
+        .unwrap();
+
+        let result = create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: pid,
+                title: "Doomed".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec!["bug".into()],
+            },
+        );
+        assert!(result.is_err(), "label attach failure must surface");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE project_id = ?1",
+                params![pid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "failed create must not leave a half-created issue");
     }
 
     #[test]
@@ -857,6 +915,29 @@ mod tests {
         link_issues(&conn, i1.id, i2.id, "blocks").unwrap();
         delete_issue(&conn, i1.id).unwrap();
         assert!(get_issue(&conn, i2.id).unwrap().blocked_by.is_empty());
+    }
+
+    // LIF-135: self-links are rejected — a self-"blocks" would make the
+    // issue permanently non-workable.
+    #[test]
+    fn link_rejects_self_link() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let issue = quick_issue(&conn, pid, "Loner", "todo", "none");
+
+        for rel in ["blocks", "relates_to", "duplicate"] {
+            let err = link_issues(&conn, issue.id, issue.id, rel).unwrap_err();
+            assert!(
+                matches!(err, LificError::BadRequest(_)),
+                "self-link via '{rel}' must be BadRequest, got: {err:?}"
+            );
+        }
+
+        // And the issue is still workable (no phantom self-block).
+        let got = get_issue(&conn, issue.id).unwrap();
+        assert!(got.blocks.is_empty());
+        assert!(got.blocked_by.is_empty());
     }
 
     #[test]

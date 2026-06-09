@@ -455,13 +455,35 @@ impl LificMcp {
                     };
                     groups.entry(key).or_default().push(issue);
                 }
+                // LIF-140: order columns by workflow rank, not alphabetically.
+                // Status flows backlog → todo → active → done → cancelled;
+                // priority flows urgent → none. Module grouping stays
+                // alphabetical (the BTreeMap order), which is what you want
+                // for arbitrary names. Unknown keys sort after known ones.
+                let rank: fn(&str) -> usize = match group_by {
+                    "priority" => |k| {
+                        ["urgent", "high", "medium", "low", "none"]
+                            .iter()
+                            .position(|s| *s == k)
+                            .unwrap_or(usize::MAX)
+                    },
+                    "module" => |_| 0, // stable sort keeps alphabetical order
+                    _ => |k| {
+                        ["backlog", "todo", "active", "done", "cancelled"]
+                            .iter()
+                            .position(|s| *s == k)
+                            .unwrap_or(usize::MAX)
+                    },
+                };
+                let mut ordered: Vec<(&String, &Vec<&models::Issue>)> = groups.iter().collect();
+                ordered.sort_by_key(|(key, _)| rank(key));
                 let mut out = String::new();
                 if truncated {
                     out.push_str(&format!(
                         "warning: board view capped at {BOARD_CAP} issues — older issues are not shown. Use list_issues with offset for full paging.\n\n"
                     ));
                 }
-                for (group, items) in &groups {
+                for (group, items) in ordered {
                     out.push_str(&format!("── {} ({}) ──\n", group, items.len()));
                     for i in items {
                         out.push_str(&format!("  {}\n", fmt_issue(i)));
@@ -1685,6 +1707,71 @@ mod tests {
         }));
         assert!(result.contains("todo"), "got: {result}");
         assert!(result.contains("active"), "got: {result}");
+    }
+
+    // LIF-140: board columns follow workflow order, not alphabetical order.
+    #[test]
+    fn board_status_columns_in_workflow_order() {
+        let m = mcp();
+        seed_project(&m, "Board Order", "BRO");
+        for status in ["done", "active", "backlog", "todo", "cancelled"] {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "BRO".into(),
+                title: format!("issue {status}"),
+                status: Some(status.into()),
+                description: None,
+                priority: None,
+                module: None,
+                labels: None,
+            }));
+        }
+
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BRO".into(),
+            group_by: None,
+        }));
+
+        let pos = |s: &str| {
+            result
+                .find(&format!("── {s} ("))
+                .unwrap_or_else(|| panic!("missing column {s}: {result}"))
+        };
+        assert!(pos("backlog") < pos("todo"), "got: {result}");
+        assert!(pos("todo") < pos("active"), "got: {result}");
+        assert!(pos("active") < pos("done"), "got: {result}");
+        assert!(pos("done") < pos("cancelled"), "got: {result}");
+    }
+
+    #[test]
+    fn board_priority_columns_in_severity_order() {
+        let m = mcp();
+        seed_project(&m, "Board Prio", "BRP");
+        for priority in ["none", "medium", "urgent", "low", "high"] {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "BRP".into(),
+                title: format!("issue {priority}"),
+                status: None,
+                description: None,
+                priority: Some(priority.into()),
+                module: None,
+                labels: None,
+            }));
+        }
+
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BRP".into(),
+            group_by: Some("priority".into()),
+        }));
+
+        let pos = |s: &str| {
+            result
+                .find(&format!("── {s} ("))
+                .unwrap_or_else(|| panic!("missing column {s}: {result}"))
+        };
+        assert!(pos("urgent") < pos("high"), "got: {result}");
+        assert!(pos("high") < pos("medium"), "got: {result}");
+        assert!(pos("medium") < pos("low"), "got: {result}");
+        assert!(pos("low") < pos("none"), "got: {result}");
     }
 
     // ── pages ──

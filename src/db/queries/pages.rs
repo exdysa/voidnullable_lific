@@ -220,9 +220,7 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
     // Capture the page id from inside the savepoint closure and propagate
     // it out — `conn.last_insert_rowid()` after the savepoint releases will
     // reflect the most recent INSERT, which may be a page_labels row, not
-    // the page itself. Mirrors the same shape `create_issue` would need
-    // when wrapped (it currently isn't — see how it captures `id` once
-    // before the label inserts).
+    // the page itself. `create_issue` uses the same shape (LIF-130).
     let id = super::savepoint(conn, "create_page", || {
         conn.execute(
             "INSERT INTO pages (project_id, folder_id, title, content, sequence, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

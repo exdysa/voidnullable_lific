@@ -16,6 +16,13 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
         .collect::<Vec<_>>()
         .join(" ");
 
+    // LIF-133: an empty or whitespace-only query tokenizes to an empty FTS
+    // expression, and `MATCH ''` is an fts5 syntax error. Return no results
+    // instead of surfacing a database error.
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let base_sql = "SELECT s.entity_type, s.entity_id, s.title,
                 CASE WHEN s.body = '' OR s.body IS NULL
                      THEN snippet(search_index, 0, '**', '**', '...', 32)
@@ -134,6 +141,44 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].result_type, "issue");
         assert_eq!(results[0].identifier, Some("TST-1".into()));
+    }
+
+    // LIF-133: empty and whitespace-only queries previously built `MATCH ''`,
+    // an fts5 syntax error that surfaced as a database error. They must
+    // return an empty result set instead.
+    #[test]
+    fn search_empty_query_returns_no_results() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        issues::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: pid,
+                title: "Findable issue".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+            },
+        )
+        .unwrap();
+
+        for query in ["", "   ", "\t\n"] {
+            let results = search(
+                &conn,
+                &SearchQuery {
+                    query: query.into(),
+                    project_id: None,
+                    limit: None,
+                },
+            )
+            .unwrap_or_else(|e| panic!("query {query:?} must not error: {e}"));
+            assert!(results.is_empty(), "query {query:?} must return nothing");
+        }
     }
 
     #[test]
