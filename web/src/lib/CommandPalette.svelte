@@ -204,14 +204,26 @@
   let searching = $state(false);
   let searchGen = 0;
 
-  // Context actions matched against the query (root mode only). Empty
-  // query lists them all — they're the most likely intent on a detail
-  // page, so they render above navigation results.
+  // Universal actions, available from every view. Context actions
+  // (registered by the current route) list first since they're the more
+  // likely intent on a detail page.
+  const globalActions: PaletteAction[] = [
+    {
+      id: "new-project",
+      title: "New project",
+      run: () => navigate("/projects/new"),
+    },
+  ];
+
+  let allActions = $derived([...actions, ...globalActions]);
+
+  // Actions matched against the query (root mode only). Empty query
+  // lists them all; they render above navigation results.
   let actionHits = $derived.by(() => {
     if (mode.type !== "root") return [] as PaletteAction[];
     const q = query.trim();
-    if (!q) return actions;
-    return actions
+    if (!q) return allActions;
+    return allActions
       .map((a) => ({ a, m: fuzzyMatch(q, a.title) }))
       .filter((x) => x.m !== null && x.m.score >= 0.3)
       .sort((x, y) => y.m!.score - x.m!.score)
