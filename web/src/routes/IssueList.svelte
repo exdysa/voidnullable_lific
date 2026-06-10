@@ -1847,7 +1847,7 @@
         <Tooltip
           content={issue.priority[0].toUpperCase() + issue.priority.slice(1)}
         >
-          <PriorityIcon priority={issue.priority} size={28} />
+          <PriorityIcon priority={issue.priority} size={16} />
         </Tooltip>
       {/if}
     </span>
