@@ -19,13 +19,47 @@
     items,
     /** How many entries show before the "Show all" expander. */
     initialCount = 6,
+    /** LIF-158 feed mode: render the entity label as a navigable link
+     *  ("created issue LIF-42") instead of detail-page phrasing
+     *  ("created this issue"). */
+    showEntity = false,
+    /** Called when the user clicks an entity label in feed mode. */
+    onOpenEntity,
+    /** Server paging (feed mode): when set, the bottom control becomes
+     *  a "Load more" button instead of the local show-all expander. */
+    hasMore = false,
+    onLoadMore,
+    /** Hide the section header (the feed route owns its own chrome). */
+    bare = false,
   }: {
     items: Activity[];
     initialCount?: number;
+    showEntity?: boolean;
+    onOpenEntity?: (a: Activity) => void;
+    hasMore?: boolean;
+    onLoadMore?: () => void;
+    bare?: boolean;
   } = $props();
 
   let expanded = $state(false);
-  let visible = $derived(expanded ? items : items.slice(0, initialCount));
+  // Server-paged feeds always show everything loaded; the detail-page
+  // embed collapses to the latest few.
+  let visible = $derived(
+    onLoadMore || expanded ? items : items.slice(0, initialCount),
+  );
+
+  /** Can this entry navigate somewhere? Issues, pages, modules, and
+   *  comments (via their parent) have destinations; labels/folders/
+   *  project rows don't. */
+  function isNavigable(a: Activity): boolean {
+    if (!showEntity || !onOpenEntity) return false;
+    return (
+      a.entity_type === "issue" ||
+      a.entity_type === "page" ||
+      a.entity_type === "module" ||
+      (a.entity_type === "comment" && (a.issue_id !== null || a.page_id !== null))
+    );
+  }
 
   /** Per-entry expansion for long old→new values (description/content). */
   let openValues = $state<Set<number>>(new Set());
@@ -53,19 +87,26 @@
     return flat.length > max ? flat.slice(0, max) + "…" : flat;
   }
 
-  /** Human verb for the entry, excluding the value rendering. */
+  /** Human verb for the entry, excluding the value rendering. In feed
+   *  mode the entity is named ("created issue"); on a detail page it's
+   *  deictic ("created this issue"). The label link renders separately. */
   function verb(a: Activity): string {
+    const ent = showEntity ? a.entity_type : `this ${a.entity_type}`;
     switch (a.action) {
       case "create":
-        return a.entity_type === "comment" ? "commented" : `created this ${a.entity_type}`;
+        return a.entity_type === "comment" ? "commented on" : `created ${ent}`;
       case "delete":
-        return a.entity_type === "comment" ? "deleted a comment" : `deleted ${a.entity_type}`;
+        return a.entity_type === "comment" ? "deleted a comment on" : `deleted ${a.entity_type}`;
       case "update":
-        return a.entity_type === "comment" ? "edited a comment" : `changed ${a.field}`;
+        return a.entity_type === "comment"
+          ? "edited a comment on"
+          : showEntity
+            ? `changed ${a.field} on`
+            : `changed ${a.field}`;
       case "attach":
-        return "added label";
+        return showEntity ? "added label on" : "added label";
       case "detach":
-        return "removed label";
+        return showEntity ? "removed label on" : "removed label";
       case "link":
         return `linked ${(a.field ?? "relates_to").replace("_", " ")}`;
       case "unlink":
@@ -74,24 +115,33 @@
         return a.action;
     }
   }
+
+  /** In feed mode, comment verbs end with "on" and need the parent
+   *  label; detail mode skips the label entirely except for deletes. */
+  function showLabelAfterVerb(a: Activity): boolean {
+    if (!showEntity) return false;
+    return a.action !== "link" && a.action !== "unlink";
+  }
 </script>
 
 {#if items.length > 0}
   <section class="mt-10">
     <!-- Header: same uppercase-tracking vocabulary as the sidebar field
          labels and list group headers. -->
-    <div class="flex items-center gap-2 mb-4 pb-2 border-b border-[var(--border)]">
-      <History size={13} class="text-[var(--text-faint)]" />
-      <h2
-        class="text-[0.6875rem] font-semibold uppercase tracking-widest
-               text-[var(--text-muted)]"
-      >
-        Activity
-      </h2>
-      <span class="text-[0.6875rem] text-[var(--text-faint)] tabular-nums">
-        {items.length}
-      </span>
-    </div>
+    {#if !bare}
+      <div class="flex items-center gap-2 mb-4 pb-2 border-b border-[var(--border)]">
+        <History size={13} class="text-[var(--text-faint)]" />
+        <h2
+          class="text-[0.6875rem] font-semibold uppercase tracking-widest
+                 text-[var(--text-muted)]"
+        >
+          Activity
+        </h2>
+        <span class="text-[0.6875rem] text-[var(--text-faint)] tabular-nums">
+          {items.length}
+        </span>
+      </div>
+    {/if}
 
     <ol class="m-0 p-0 list-none relative">
       <!-- Gutter rail: ties entries into one history, mirroring the
@@ -125,6 +175,21 @@
 
             <!-- Verb + values -->
             {verb(a)}
+            {#if showLabelAfterVerb(a)}
+              {#if isNavigable(a)}
+                <button
+                  class="font-mono text-[0.75rem] text-[var(--accent)]
+                         hover:underline align-baseline"
+                  onclick={() => onOpenEntity?.(a)}
+                >
+                  {a.entity_label ?? `#${a.entity_id}`}
+                </button>
+              {:else}
+                <span class="font-mono text-[0.75rem] text-[var(--text-muted)]">
+                  {a.entity_label ?? `#${a.entity_id}`}
+                </span>
+              {/if}
+            {/if}
             {#if a.action === "update" && a.field === "status"}
               <span class="inline-flex items-center gap-1 align-middle mx-0.5">
                 <StatusIcon status={a.old_value ?? ""} size={12} />
@@ -208,7 +273,20 @@
       {/each}
     </ol>
 
-    {#if items.length > initialCount}
+    {#if onLoadMore}
+      <!-- Feed mode: server paging. -->
+      {#if hasMore}
+        <button
+          class="mt-3 ml-5 text-[0.75rem] text-[var(--text-muted)]
+                 hover:text-[var(--text)] inline-flex items-center gap-1
+                 transition-colors"
+          onclick={onLoadMore}
+        >
+          <ChevronDown size={12} />
+          Load more
+        </button>
+      {/if}
+    {:else if items.length > initialCount}
       <button
         class="mt-2 ml-5 text-[0.75rem] text-[var(--text-muted)]
                hover:text-[var(--text)] inline-flex items-center gap-1

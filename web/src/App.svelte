@@ -11,6 +11,7 @@
   import PageDetail from "./routes/PageDetail.svelte";
   import ModuleList from "./routes/ModuleList.svelte";
   import ModuleDetail from "./routes/ModuleDetail.svelte";
+  import ProjectActivity from "./routes/ProjectActivity.svelte";
   import Layout from "./lib/Layout.svelte";
   import { hasSession } from "./lib/api";
 
@@ -67,6 +68,7 @@
     | { type: "app"; page: "page-detail"; project: string; pageId: number }
     | { type: "app"; page: "modules"; project: string }
     | { type: "app"; page: "module-detail"; project: string; moduleId: number }
+    | { type: "app"; page: "activity"; project: string }
     | { type: "loading" };
 
   function parseRoute(input: string): ParsedRoute {
@@ -159,6 +161,12 @@
       };
     }
 
+    // Project-scoped: /{IDENTIFIER}/activity (audit log feed — LIF-158)
+    const activityMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/activity$/i);
+    if (activityMatch) {
+      return { type: "app", page: "activity", project: activityMatch[1] };
+    }
+
     // Project-scoped: /{IDENTIFIER}/modules
     const moduleListMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/modules$/i);
     if (moduleListMatch) {
@@ -237,6 +245,8 @@
         projectIdentifier={parsed.project}
         moduleId={parsed.moduleId}
       />
+    {:else if parsed.page === "activity"}
+      <ProjectActivity {navigate} projectIdentifier={parsed.project} />
     {/if}
   </Layout>
 {/if}
