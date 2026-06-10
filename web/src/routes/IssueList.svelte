@@ -910,7 +910,7 @@
         </button>
         <ChevronRight size={12} class="text-[var(--text-faint)]" />
         <span class="text-[0.8125rem] font-medium text-[var(--text)]">
-          Issues
+          {layout === "board" ? "Board" : "Issues"}
         </span>
         {#if !loading}
           <span
