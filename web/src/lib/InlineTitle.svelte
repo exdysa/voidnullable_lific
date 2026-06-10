@@ -62,9 +62,9 @@
     type="text"
     bind:value={draft}
     class="w-full {sizeClass} font-display tracking-tight
-           bg-transparent border-none outline-none
-           text-[var(--text)] py-1
-           border-b-2 border-b-[var(--accent)]"
+           bg-transparent border-0 border-b-2 border-solid
+           border-b-[var(--accent)] outline-none
+           text-[var(--text)] py-1"
     onblur={commit}
     onkeydown={onKey}
     autofocus
