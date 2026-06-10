@@ -6,6 +6,7 @@
     listLabels,
     updateIssue,
     createIssue,
+    deleteIssue,
     type Issue,
     type Project,
     type Module,
@@ -15,7 +16,9 @@
     Plus, Search, ChevronRight, X, Layers, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDownUp, ArrowDown, ArrowUp, Hash, Clock, History,
+    Check, Trash2,
   } from "lucide-svelte";
+  import { fly } from "svelte/transition";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
@@ -286,6 +289,10 @@
       displayOpen ||
       inlineCreateActive ||
       statusDropdownId !== null ||
+      // LIF-149: a poll mustn't shuffle rows mid-selection or land stale
+      // data on top of an in-flight bulk write.
+      selectedIds.size > 0 ||
+      bulkBusy ||
       // Don't refetch while the user is typing in the search box.
       (searchExpanded && document.activeElement === searchInputEl)
     );
@@ -596,6 +603,112 @@
   // Status dropdown on existing issue rows
   let statusDropdownId = $state<number | null>(null);
 
+  // ── LIF-149: multi-select + bulk actions ─────────────
+  // Selection is ephemeral (never persisted): `x` toggles the focused
+  // row, shift+click / shift+j/k extend, ctrl/cmd+click toggles, Esc
+  // clears. While anything is selected a floating action bar offers
+  // status / priority / module / label / delete across the whole set.
+  let selectedIds = $state<Set<number>>(new Set());
+  let lastSelectedIdx = $state(-1);
+  // Which action-bar menu is open (popovers open upward from the bar).
+  let bulkMenu = $state<"status" | "priority" | "module" | "label" | "delete" | null>(null);
+  let bulkBusy = $state(false);
+
+  function toggleSelect(id: number, idx: number) {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedIds = next;
+    lastSelectedIdx = idx;
+  }
+
+  function rangeSelect(idx: number) {
+    if (lastSelectedIdx < 0 || lastSelectedIdx >= flatIssues.length) {
+      toggleSelect(flatIssues[idx].id, idx);
+      return;
+    }
+    const [a, b] = lastSelectedIdx < idx ? [lastSelectedIdx, idx] : [idx, lastSelectedIdx];
+    const next = new Set(selectedIds);
+    for (let i = a; i <= b; i++) next.add(flatIssues[i].id);
+    selectedIds = next;
+    lastSelectedIdx = idx;
+  }
+
+  function clearSelection() {
+    selectedIds = new Set();
+    lastSelectedIdx = -1;
+    bulkMenu = null;
+  }
+
+  // Prune selection to rows that still exist — filters, search, and the
+  // background poll can all remove rows out from under a selection. Only
+  // writes when something actually fell out, so the effect settles.
+  $effect(() => {
+    const visible = new Set(flatIssues.map((i) => i.id));
+    if ([...selectedIds].some((id) => !visible.has(id))) {
+      selectedIds = new Set([...selectedIds].filter((id) => visible.has(id)));
+    }
+  });
+
+  /** Apply the same field update to every selected issue. Optimistic:
+   *  stamps the change locally on success; converges via reload if any
+   *  PUT fails (rare — same tradeoff as the board's drop handler). */
+  async function bulkUpdate(input: Record<string, unknown>) {
+    if (bulkBusy || selectedIds.size === 0) return;
+    bulkBusy = true;
+    bulkMenu = null;
+    skipFocusReset = true;
+    const ids = [...selectedIds];
+    const results = await Promise.all(
+      ids.map((id) => trackMutation(updateIssue(id, input))),
+    );
+    bulkBusy = false;
+    if (results.some((r) => !r.ok)) {
+      await loadIssues();
+    } else {
+      issues = issues.map((i) =>
+        selectedIds.has(i.id) ? { ...i, ...(input as Partial<Issue>) } : i,
+      );
+    }
+  }
+
+  /** Add one label to every selected issue (union — issues that already
+   *  carry it are skipped, not toggled, so the action is idempotent). */
+  async function bulkAddLabel(name: string) {
+    if (bulkBusy || selectedIds.size === 0) return;
+    bulkBusy = true;
+    bulkMenu = null;
+    skipFocusReset = true;
+    const targets = issues.filter(
+      (i) => selectedIds.has(i.id) && !i.labels.includes(name),
+    );
+    const results = await Promise.all(
+      targets.map((i) =>
+        trackMutation(updateIssue(i.id, { labels: [...i.labels, name] })),
+      ),
+    );
+    bulkBusy = false;
+    if (results.some((r) => !r.ok)) {
+      await loadIssues();
+    } else {
+      const targetIds = new Set(targets.map((t) => t.id));
+      issues = issues.map((i) =>
+        targetIds.has(i.id) ? { ...i, labels: [...i.labels, name] } : i,
+      );
+    }
+  }
+
+  async function bulkDelete() {
+    if (bulkBusy || selectedIds.size === 0) return;
+    bulkBusy = true;
+    bulkMenu = null;
+    const ids = [...selectedIds];
+    await Promise.all(ids.map((id) => trackMutation(deleteIssue(id))));
+    bulkBusy = false;
+    clearSelection();
+    await loadIssues();
+  }
+
   // Status picker keyboard index (shared by inline create and row dropdowns)
   let inlineCreateStatusIdx = $state(0);
 
@@ -755,19 +868,47 @@
     switch (e.key) {
       case "ArrowDown":
       case "j":
+      case "J": {
         e.preventDefault();
         if (!canFireKey()) break;
         markKeyboardActive();
         scrollOnFocus = true;
+        const prevDown = focusedIndex;
         focusedIndex = Math.min(focusedIndex + 1, flatIssues.length - 1);
+        // Shift extends the selection across the rows the cursor sweeps.
+        if (e.shiftKey && focusedIndex >= 0) {
+          const next = new Set(selectedIds);
+          if (prevDown >= 0 && flatIssues[prevDown]) next.add(flatIssues[prevDown].id);
+          if (flatIssues[focusedIndex]) next.add(flatIssues[focusedIndex].id);
+          selectedIds = next;
+          lastSelectedIdx = focusedIndex;
+        }
         break;
+      }
       case "ArrowUp":
       case "k":
+      case "K": {
         e.preventDefault();
         if (!canFireKey()) break;
         markKeyboardActive();
         scrollOnFocus = true;
+        const prevUp = focusedIndex;
         focusedIndex = Math.max(focusedIndex - 1, 0);
+        if (e.shiftKey && focusedIndex >= 0) {
+          const next = new Set(selectedIds);
+          if (prevUp >= 0 && flatIssues[prevUp]) next.add(flatIssues[prevUp].id);
+          if (flatIssues[focusedIndex]) next.add(flatIssues[focusedIndex].id);
+          selectedIds = next;
+          lastSelectedIdx = focusedIndex;
+        }
+        break;
+      }
+      case "x":
+        // Toggle selection on the focused row (LIF-149).
+        if (focusedIndex >= 0 && focusedIndex < flatIssues.length) {
+          e.preventDefault();
+          toggleSelect(flatIssues[focusedIndex].id, focusedIndex);
+        }
         break;
       case "Enter":
         if (focusedIndex >= 0 && focusedIndex < flatIssues.length) {
@@ -823,8 +964,12 @@
           displayOpen = false;
         } else if (sortOpen) {
           sortOpen = false;
+        } else if (bulkMenu !== null) {
+          bulkMenu = null;
         } else if (statusDropdownId !== null) {
           statusDropdownId = null;
+        } else if (selectedIds.size > 0) {
+          clearSelection();
         } else if (inlineCreateActive) {
           inlineCreateActive = false;
           inlineCreateStatusOpen = false;
@@ -863,6 +1008,7 @@
     hintsOpen = false;
     displayOpen = false;
     sortOpen = false;
+    bulkMenu = null;
   }}
 />
 
@@ -1254,6 +1400,8 @@
                 ["C", "New issue"],
                 ["S", "Cycle status"],
                 ["↑ ↓ / J K", "Navigate"],
+                ["X", "Select"],
+                ["⇧ J K", "Extend selection"],
                 ["Enter", "Open"],
                 ["/", "Search"],
                 ["?", "Show this"],
@@ -1686,25 +1834,280 @@
       {/each}
     {/if}
   </div>
+
+  <!-- ── LIF-149: floating bulk-action bar ─────────────────
+       Appears while anything is selected. Menus open upward. The outer
+       div owns viewport centering; the inner div owns the entrance fly
+       so the two transforms don't fight. -->
+  {#if selectedIds.size > 0}
+    <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-40">
+      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+      <div
+        class="flex items-center gap-0.5 pl-3 pr-1.5 py-1.5
+               bg-[var(--surface)] border border-[var(--border)]
+               rounded-xl shadow-[0_8px_28px_rgba(0,0,0,0.18)]"
+        in:fly={{ y: 8, duration: 180 }}
+        onclick={(e) => e.stopPropagation()}
+      >
+        <span class="text-[0.8125rem] font-medium text-[var(--text)] tabular-nums pr-1">
+          {selectedIds.size} selected
+        </span>
+        {#if bulkBusy}
+          <span class="text-[0.75rem] text-[var(--text-faint)] animate-pulse pr-1">
+            Applying...
+          </span>
+        {/if}
+        <div class="w-px h-4 bg-[var(--border)] mx-1"></div>
+
+        {#snippet bulkTrigger(menu: "status" | "priority" | "module" | "label", label: string)}
+          <button
+            class="text-[0.8125rem] px-2 py-1 rounded-md transition-colors
+                   disabled:opacity-50 disabled:cursor-not-allowed
+                   {bulkMenu === menu
+              ? 'text-[var(--text)] bg-[var(--bg-subtle)]'
+              : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+            disabled={bulkBusy}
+            onclick={(e) => {
+              e.stopPropagation();
+              bulkMenu = bulkMenu === menu ? null : menu;
+            }}
+          >
+            {label}
+          </button>
+        {/snippet}
+
+        <!-- Status -->
+        <div class="relative">
+          {@render bulkTrigger("status", "Status")}
+          {#if bulkMenu === "status"}
+            <div
+              class="absolute bottom-full mb-1.5 left-0 w-[160px]
+                     bg-[var(--surface)] border border-[var(--border)]
+                     rounded-lg shadow-lg py-1.5"
+            >
+              {#each STATUSES as s}
+                <button
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                         text-[0.8125rem] text-[var(--text)] capitalize
+                         hover:bg-[var(--bg-subtle)] transition-colors"
+                  onclick={() => bulkUpdate({ status: s })}
+                >
+                  <StatusIcon status={s} size={14} />
+                  {s}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Priority -->
+        <div class="relative">
+          {@render bulkTrigger("priority", "Priority")}
+          {#if bulkMenu === "priority"}
+            <div
+              class="absolute bottom-full mb-1.5 left-0 w-[160px]
+                     bg-[var(--surface)] border border-[var(--border)]
+                     rounded-lg shadow-lg py-1.5"
+            >
+              {#each PRIORITIES as p}
+                <button
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                         text-[0.8125rem] text-[var(--text)] capitalize
+                         hover:bg-[var(--bg-subtle)] transition-colors"
+                  onclick={() => bulkUpdate({ priority: p })}
+                >
+                  <PriorityIcon priority={p} size={14} />
+                  {p}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Module (only when the project has modules) -->
+        {#if modules.length > 0}
+          <div class="relative">
+            {@render bulkTrigger("module", "Module")}
+            {#if bulkMenu === "module"}
+              <div
+                class="absolute bottom-full mb-1.5 left-0 w-[180px]
+                       bg-[var(--surface)] border border-[var(--border)]
+                       rounded-lg shadow-lg py-1.5 max-h-[40vh] overflow-y-auto"
+              >
+                <button
+                  class="w-full px-3 py-1.5 text-left text-[0.8125rem]
+                         text-[var(--text-faint)] hover:bg-[var(--bg-subtle)]
+                         transition-colors"
+                  onclick={() => bulkUpdate({ module_id: null })}
+                >
+                  None
+                </button>
+                {#each modules as mod (mod.id)}
+                  <button
+                    class="w-full px-3 py-1.5 text-left text-[0.8125rem]
+                           text-[var(--text)] hover:bg-[var(--bg-subtle)]
+                           transition-colors truncate"
+                    onclick={() => bulkUpdate({ module_id: mod.id })}
+                  >
+                    {mod.name}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Add label (only when the project has labels) -->
+        {#if labels.length > 0}
+          <div class="relative">
+            {@render bulkTrigger("label", "Label")}
+            {#if bulkMenu === "label"}
+              <div
+                class="absolute bottom-full mb-1.5 left-0 w-[180px]
+                       bg-[var(--surface)] border border-[var(--border)]
+                       rounded-lg shadow-lg py-1.5 max-h-[40vh] overflow-y-auto"
+              >
+                {#each labels as lbl (lbl.id)}
+                  <button
+                    class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                           text-[0.8125rem] text-[var(--text)]
+                           hover:bg-[var(--bg-subtle)] transition-colors"
+                    onclick={() => bulkAddLabel(lbl.name)}
+                  >
+                    <span
+                      class="size-2.5 rounded-full shrink-0"
+                      style="background: {lbl.color}"
+                    ></span>
+                    <span class="truncate">{lbl.name}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="w-px h-4 bg-[var(--border)] mx-1"></div>
+
+        <!-- Delete (confirm popover) -->
+        <div class="relative">
+          <button
+            class="size-7 flex items-center justify-center rounded-md
+                   text-[var(--error)] hover:bg-[var(--error-bg)]
+                   transition-colors disabled:opacity-50"
+            title="Delete selected"
+            disabled={bulkBusy}
+            onclick={(e) => {
+              e.stopPropagation();
+              bulkMenu = bulkMenu === "delete" ? null : "delete";
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+          {#if bulkMenu === "delete"}
+            <div
+              class="absolute bottom-full mb-1.5 right-0 w-[240px]
+                     bg-[var(--surface)] border border-[var(--border)]
+                     rounded-lg shadow-lg p-3"
+            >
+              <p class="text-[0.8125rem] font-medium text-[var(--text)] mb-1">
+                Delete {selectedIds.size} issue{selectedIds.size === 1 ? "" : "s"}?
+              </p>
+              <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
+                This can't be undone.
+              </p>
+              <div class="flex items-center gap-2">
+                <button
+                  class="text-[0.8125rem] font-medium text-[var(--error-text)]
+                         bg-[var(--error)] px-3 py-1.5 rounded-md
+                         hover:opacity-90 transition-opacity
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={bulkBusy}
+                  onclick={bulkDelete}
+                >
+                  {bulkBusy ? "Deleting..." : "Delete"}
+                </button>
+                <button
+                  class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
+                         rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                  onclick={() => { bulkMenu = null; }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Clear -->
+        <button
+          class="size-7 flex items-center justify-center rounded-md
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors"
+          title="Clear selection  ·  Esc"
+          onclick={clearSelection}
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 {/if}
 
 {#snippet issueRow(issue: Issue, idx: number)}
   {@const isFocused = idx === focusedIndex}
+  {@const isSelected = selectedIds.has(issue.id)}
   {@const hitSnippet = issueSearchScores.get(issue.id)?.snippet ?? null}
   <div
     class="w-full flex items-center gap-3 px-6 py-2.5 text-left
            border-b border-[var(--border)] last:border-b-0
            border-l-2 transition-colors group cursor-pointer
-           {isFocused
-      ? 'border-l-[var(--accent)] bg-[var(--accent-subtle)]'
-      : 'border-l-transparent hover:bg-[var(--bg-subtle)]'}"
+           {isFocused ? 'border-l-[var(--accent)]' : 'border-l-transparent'}
+           {isSelected || isFocused
+      ? 'bg-[var(--accent-subtle)]'
+      : 'hover:bg-[var(--bg-subtle)]'}"
     data-issue-index={idx}
     role="button"
     tabindex="-1"
-    onclick={() => navigate(`/${projectIdentifier}/issues/${issue.identifier}`)}
+    onclick={(e) => {
+      // LIF-149: shift-click extends a range, ctrl/cmd-click toggles —
+      // plain click still opens the issue.
+      if (e.shiftKey) {
+        e.preventDefault();
+        rangeSelect(idx);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        toggleSelect(issue.id, idx);
+        return;
+      }
+      navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
+    }}
     onmouseenter={(e) => { if (shouldAcceptMouse(e)) focusedIndex = idx; }}
   >
+    <!-- Selection checkbox (LIF-149). Space is always reserved so rows
+         never shift; the box is invisible until hover or until a
+         selection exists anywhere, then stays visible for the session
+         of that selection. -->
+    <button
+      class="size-4 shrink-0 rounded border flex items-center justify-center
+             transition-all
+             {isSelected
+        ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-text)]'
+        : 'border-[var(--border)] text-transparent hover:border-[var(--text-faint)]'}
+             {isSelected || selectedIds.size > 0
+        ? 'opacity-100'
+        : 'opacity-0 group-hover:opacity-100'}"
+      title={isSelected ? "Deselect" : "Select  ·  X"}
+      onclick={(e) => {
+        e.stopPropagation();
+        if (e.shiftKey) rangeSelect(idx);
+        else toggleSelect(issue.id, idx);
+      }}
+    >
+      <Check size={11} strokeWidth={3} />
+    </button>
     <!-- Status indicator (clickable to pick).
          Tooltip suppressed while the status picker is open for this row,
          otherwise it'd hover-fight with the dropdown. -->
