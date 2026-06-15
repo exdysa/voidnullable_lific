@@ -12,8 +12,9 @@ session ends or the context is compacted. This plugin replaces it so the list:
 - is **persisted to a Lific plan** (one per OpenCode session, per project),
   visible/editable in the Lific web UI (Plans tab),
 - is **re-injected on compaction**, so the model resumes from the same plan,
-- supports **multiple projects**: the tool takes an optional `project` arg, so
-  different Lific projects in the same session get distinct plans.
+- supports **multiple projects**: the target project is set **per folder** via
+  the `set_lific_project` tool (no global default), so every repo maps to its
+  own Lific project.
 
 Each todo maps to a plan step; steps are marked done for `completed`/`cancelled`
 todos, and the plan is marked `done` once everything is complete.
@@ -51,15 +52,14 @@ cp index.ts ~/.config/opencode/plugin/lific-plans.ts
 }
 ```
 
-## Configure
+## Configure (connection only)
 
-Env vars (or plugin options). `URL` + `API_KEY` activate the override;
-`PLAN_PROJECT` is the default project when the model doesn't pass one.
+Just the Lific connection — env vars or plugin options. There is **no global
+project setting**; the project is chosen per folder (see below).
 
 ```bash
 export LIFIC_URL="https://your-lific-instance"
 export LIFIC_API_KEY="lific_sk_…"        # Lific → Settings → API keys
-export LIFIC_PLAN_PROJECT="LIF"          # default project (model can override per call)
 ```
 
 ```jsonc
@@ -67,14 +67,30 @@ export LIFIC_PLAN_PROJECT="LIF"          # default project (model can override p
   "plugin": [
     ["file:///abs/path/to/integrations/opencode-lific-plans/index.ts", {
       "url": "https://your-lific-instance",
-      "apiKey": "lific_sk_…",
-      "project": "LIF"
+      "apiKey": "lific_sk_…"
     }]
   ]
 }
 ```
 
 Restart OpenCode after changing config — plugins load once at startup.
+
+## Pick the project, per folder
+
+The plugin exposes a `set_lific_project` tool. Run it **once per folder** to
+choose which Lific project that folder's plans go to:
+
+```
+set_lific_project({ project: "LIF" })
+```
+
+It validates the identifier against your Lific instance (and lists the available
+projects if you mistype), then remembers the choice — keyed by the folder's
+worktree — in `~/.cache/opencode/lific-plans/projects.json`, so it persists
+across sessions. Different repos map to different projects automatically.
+
+Calling the todo tool **before** setting the project fails with a clear
+instruction to run `set_lific_project` first.
 
 ## Notes / limits
 

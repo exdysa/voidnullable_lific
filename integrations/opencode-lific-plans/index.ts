@@ -1,23 +1,17 @@
 // opencode-lific-plans — Lific-backed planning for OpenCode.
 //
-// This plugin OVERRIDES the builtin `todowrite` tool. Because the OpenCode TUI
-// keys its special todo rendering on the literal tool name `todowrite`
-// (packages/tui/src/routes/session/index.tsx — a <Switch> on toolDisplay()),
-// keeping the name means the plan renders with the exact native todo block.
-// On top of that, every planning call is persisted to a Lific **plan** (one per
-// OpenCode session, per project), so the plan survives across sessions and
-// compaction and is editable in the Lific web UI.
+// Overrides the builtin `todowrite` tool so planning renders with the native
+// todo block (the TUI name-gates that rendering to "todowrite") AND is
+// persisted to a Lific plan that survives sessions + compaction.
 //
-// Multi-project: the tool takes an optional `project` arg (Lific project
-// identifier). Different projects in the same session get distinct plans.
+// Which Lific PROJECT a folder's plans go to is set ONCE PER FOLDER via the
+// `set_lific_project` tool (stored in ~/.cache/opencode/lific-plans/projects.json,
+// keyed by worktree). There is deliberately no global default project — calling
+// `todowrite` before `set_lific_project` fails with a clear instruction.
 //
-// Hard dependency (by design): when Lific is configured, a failed Lific write
-// THROWS so planning visibly fails if Lific is down — a forcing function to
-// keep Lific running. When Lific is NOT configured, the tool falls back to pure
-// native behavior (render only), so it is always safe to load.
-//
-// Config (plugin options OR env):
-//   LIFIC_URL, LIFIC_API_KEY, LIFIC_PLAN_PROJECT (default project identifier)
+// Connection config (plugin options OR env): LIFIC_URL, LIFIC_API_KEY.
+// When unconfigured, the override falls back to pure native behavior so the
+// plugin is always safe to load.
 
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
@@ -48,7 +42,6 @@ interface Todo {
 interface Cfg {
   url: string;
   apiKey: string;
-  project: string;
 }
 
 function loadConfig(options?: Record<string, unknown>): Cfg | null {
@@ -56,13 +49,40 @@ function loadConfig(options?: Record<string, unknown>): Cfg | null {
     (typeof options?.[k] === "string" ? (options![k] as string) : "") || process.env[env] || "";
   const url = pick("url", "LIFIC_URL").replace(/\/+$/, "");
   const apiKey = pick("apiKey", "LIFIC_API_KEY");
-  const project = pick("project", "LIFIC_PLAN_PROJECT");
   if (!url || !apiKey) return null;
-  return { url, apiKey, project };
+  return { url, apiKey };
 }
 
-// ── Per-session JSON store: { plans: {project: planId}, latest: planId } ──
 const CACHE_DIR = join(homedir(), ".cache", "opencode", "lific-plans");
+
+// ── Per-folder project map: { [worktree]: projectIdentifier } ──
+const PROJECTS_FILE = join(CACHE_DIR, "projects.json");
+function readProjects(): Record<string, string> {
+  try {
+    return JSON.parse(readFileSync(PROJECTS_FILE, "utf8")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+function writeProjects(map: Record<string, string>) {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(PROJECTS_FILE, JSON.stringify(map, null, 2));
+  } catch {
+    /* best-effort */
+  }
+}
+const folderKey = (worktree?: string, directory?: string) => worktree || directory || process.cwd();
+function getFolderProject(key: string): string | undefined {
+  return readProjects()[key];
+}
+function setFolderProject(key: string, project: string) {
+  const m = readProjects();
+  m[key] = project;
+  writeProjects(m);
+}
+
+// ── Per-session plan store: { plans: {project: planId}, latest: planId } ──
 function storePath(sessionID: string) {
   return join(CACHE_DIR, `${sessionID.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
@@ -99,9 +119,8 @@ class Lific {
     }
     return (res.status === 204 ? null : await res.json()) as T;
   }
-  async projectId(identifier: string): Promise<number | null> {
-    const projects = await this.req<Array<{ id: number; identifier: string }>>("GET", "/projects");
-    return projects.find((p) => p.identifier === identifier)?.id ?? null;
+  projects() {
+    return this.req<Array<{ id: number; identifier: string }>>("GET", "/projects");
   }
   getPlan(id: number) {
     return this.req<Plan>("GET", `/plans/${id}`);
@@ -123,8 +142,6 @@ class Lific {
   }
 }
 
-/** Reconcile a plan's top-level steps with the flat todo list (match by
- *  content: toggle done, add new, delete gone). Returns the refreshed plan. */
 async function syncTodos(lific: Lific, planId: number, todos: Todo[]): Promise<Plan> {
   let plan = await lific.getPlan(planId);
   const byTitle = new Map<string, Step>();
@@ -166,13 +183,13 @@ function renderPlanMarkdown(plan: Plan): string {
   return lines.join("\n");
 }
 
-const TODOWRITE_DESCRIPTION = `Use this tool to create and manage a structured task list for the current coding session, and to persist it as a durable Lific plan.
+const TODOWRITE_DESCRIPTION = `Create and manage a structured task list for the current coding session, persisted as a durable Lific plan.
 
-Keep it updated as you work: mark exactly one task in_progress at a time, mark tasks completed the moment they are done, and add follow-ups as they appear. Use it for any non-trivial, multi-step work (3+ steps); skip it for single trivial actions.
+Keep it updated as you work: exactly one task in_progress at a time, mark tasks completed the moment they're done, add follow-ups as they appear. Use for any non-trivial multi-step work (3+ steps).
 
-Each todo: { content, status (pending|in_progress|completed|cancelled), priority (high|medium|low) }. The whole list is replaced on every call.
+Each todo: { content, status (pending|in_progress|completed|cancelled), priority (high|medium|low) }. The whole list is replaced each call. It renders inline like the native todo list AND is mirrored to a Lific plan for this folder.
 
-Optionally pass \`project\` (a Lific project identifier, e.g. LIF) to choose which Lific project the plan is stored under; otherwise the configured default is used. The list renders inline exactly like the native todo list AND is mirrored to a Lific plan that survives across sessions and compaction.`;
+Requires the folder's Lific project to be set first via \`set_lific_project\`; if it isn't, this tool fails with instructions.`;
 
 export const LificPlans: Plugin = async ({ client, worktree, directory }, options) => {
   const cfg = loadConfig(options);
@@ -184,7 +201,7 @@ export const LificPlans: Plugin = async ({ client, worktree, directory }, option
 
   async function resolveProjectId(identifier: string): Promise<number | null> {
     if (projectIdCache.has(identifier)) return projectIdCache.get(identifier)!;
-    const id = await lific!.projectId(identifier);
+    const id = (await lific!.projects()).find((p) => p.identifier === identifier)?.id ?? null;
     projectIdCache.set(identifier, id);
     return id;
   }
@@ -213,9 +230,40 @@ export const LificPlans: Plugin = async ({ client, worktree, directory }, option
   }
 
   return {
-    // Override the builtin todowrite so the native renderer still fires (it is
-    // name-gated to "todowrite") while we persist to Lific.
     tool: {
+      // Set the Lific project for THIS folder — required before planning.
+      set_lific_project: tool({
+        description:
+          "Set the Lific project that plans for the current folder/workspace are stored under. Required once per folder before the todo tool can persist; the choice is remembered across sessions. Pass the project identifier (e.g. LIF).",
+        args: {
+          project: tool.schema.string().describe("Lific project identifier, e.g. LIF"),
+        },
+        async execute(args, context) {
+          if (!lific || !cfg) {
+            throw new Error("Lific is not configured — set LIFIC_URL and LIFIC_API_KEY (plugin options or env).");
+          }
+          const project = args.project.trim();
+          if (!project) throw new Error("project identifier is required");
+          const pid = await resolveProjectId(project).catch((e) => {
+            throw new Error(`couldn't reach Lific at ${cfg.url}: ${String(e)}`);
+          });
+          if (pid == null) {
+            const ids = await lific
+              .projects()
+              .then((ps) => ps.map((p) => p.identifier))
+              .catch(() => []);
+            throw new Error(
+              `Lific project '${project}' not found.` + (ids.length ? ` Available: ${ids.join(", ")}` : ""),
+            );
+          }
+          const key = folderKey(context.worktree, context.directory);
+          setFolderProject(key, project);
+          await log("info", `folder ${key} → project ${project}`);
+          return `Lific project for this folder set to '${project}'. Plans will be stored there. You can now use the todo tool.`;
+        },
+      }),
+
+      // Override builtin todowrite: native render + Lific persistence.
       todowrite: tool({
         description: TODOWRITE_DESCRIPTION,
         args: {
@@ -230,40 +278,35 @@ export const LificPlans: Plugin = async ({ client, worktree, directory }, option
               }),
             )
             .describe("The updated todo list"),
-          project: tool.schema
-            .string()
-            .describe("Lific project identifier to store this plan under (e.g. LIF). Defaults to the configured project.")
-            .optional(),
         },
         async execute(args, context) {
           const todos = (args.todos ?? []) as Todo[];
           const incomplete = todos.filter((t) => t.status !== "completed").length;
 
-          // Reproduce the native todo block: the TUI reads metadata.todos.
+          // Native render: the TUI reads metadata.todos.
           context.metadata({ title: `${incomplete} todos`, metadata: { todos } });
 
           let footer = "";
           if (lific && cfg) {
-            const project = (args.project || cfg.project || "").trim();
+            const key = folderKey(context.worktree, context.directory);
+            const project = getFolderProject(key);
             if (!project) {
-              footer = "\n\n(Lific: no project set — pass `project` or set LIFIC_PLAN_PROJECT to persist)";
-            } else {
-              try {
-                const planId = await ensurePlan(context.sessionID, project);
-                const plan = await syncTodos(lific, planId, todos);
-                const store = readStore(context.sessionID);
-                store.latest = planId;
-                writeStore(context.sessionID, store);
-                footer = `\n\nLific plan: ${plan.identifier} — ${plan.done_count}/${plan.step_count} done`;
-              } catch (err) {
-                // Hard fail: planning requires Lific when it's configured.
-                throw new Error(
-                  `Lific planning failed — is Lific reachable at ${cfg.url}? (${String(err)})`,
-                );
-              }
+              throw new Error(
+                "No Lific project set for this folder. Run set_lific_project({ project: \"<IDENTIFIER>\" }) " +
+                  "first to choose where this folder's plans are stored, then retry.",
+              );
+            }
+            try {
+              const planId = await ensurePlan(context.sessionID, project);
+              const plan = await syncTodos(lific, planId, todos);
+              const store = readStore(context.sessionID);
+              store.latest = planId;
+              writeStore(context.sessionID, store);
+              footer = `\n\nLific plan: ${plan.identifier} — ${plan.done_count}/${plan.step_count} done`;
+            } catch (err) {
+              throw new Error(`Lific planning failed — is Lific reachable at ${cfg.url}? (${String(err)})`);
             }
           }
-
           return JSON.stringify(todos, null, 2) + footer;
         },
       }),
@@ -278,7 +321,7 @@ export const LificPlans: Plugin = async ({ client, worktree, directory }, option
         if (plan.step_count === 0) return;
         output.context.push(
           `## Active Lific plan (${plan.identifier})\n` +
-            `This session's plan lives in Lific and survives compaction. Resume from it; keep planning via the todo tool (mirrored to this plan).\n\n` +
+            `This session's plan lives in Lific and survives compaction. Resume from it; keep planning via the todo tool.\n\n` +
             renderPlanMarkdown(plan),
         );
       } catch {
