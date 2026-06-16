@@ -5,23 +5,31 @@
     createBot,
     disconnectBot,
     deleteBot,
+    updateProfile,
+    changePassword,
+    revokeAllSessions,
+    logout,
+    clearSession,
     TOOL_TEMPLATES,
     type AuthUser,
     type Bot,
     type ToolTemplate,
   } from "../lib/api";
+  import ToolIcon from "../lib/ToolIcon.svelte";
+  import {
+    getPreference, setPreference, type ThemePreference,
+  } from "../lib/theme";
+  import {
+    Plug, Check, Copy, X, AlertTriangle, Sun, Moon, Monitor,
+    Palette, Lock, LogOut,
+  } from "lucide-svelte";
   import { getContext } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
 
-  // Register topbar with Layout's chrome slot so the workspace-level
-  // Settings page has a chrome breadcrumb matching every other route.
-  // Previously this surface was bare — chrome ended at the sidebar
-  // edge and content jumped straight into the recessed panel.
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
   } | undefined>("lific:topbar");
-
   $effect(() => {
     topbarCtx?.set(topbarContent);
     return () => topbarCtx?.set(undefined);
@@ -31,403 +39,492 @@
   let bots = $state<Bot[]>([]);
   let loading = $state(true);
 
-  // Connection flow
+  // Connect modal
+  let connectTool = $state<ToolTemplate | null>(null);
+  let connectKey = $state<string | null>(null);
   let connecting = $state(false);
-  let selectedTool = $state<ToolTemplate | null>(null);
-  let createdKey = $state<string | null>(null);
   let connectError = $state("");
+  let copied = $state(false);
 
-  // Disconnect / Delete
-  let disconnectingId = $state<number | null>(null);
-  let deletingId = $state<number | null>(null);
+  let busyId = $state<number | null>(null);
+
+  // Profile edit (a proper labeled form, separate from the read-only
+  // identity header — name/email aren't casual click-to-edit fields).
+  let profileName = $state("");
+  let profileEmail = $state("");
+  let profileSaving = $state(false);
+  let profileError = $state("");
+  let profileSavedAt = $state(0);
+
+  // Appearance
+  let themePref = $state<ThemePreference>("system");
+
+  // Security
+  let curPw = $state("");
+  let newPw = $state("");
+  let pwError = $state("");
+  let pwSaving = $state(false);
+  let pwSuccess = $state(false);
+  let signingOut = $state(false);
 
   $effect(() => {
+    themePref = getPreference();
     loadUser();
   });
+
+  let hasProfileChanges = $derived(
+    user != null && (
+      profileName.trim() !== user.display_name ||
+      profileEmail.trim().toLowerCase() !== user.email
+    ),
+  );
+
+  async function saveProfile() {
+    if (!user || !hasProfileChanges || profileSaving) return;
+    profileSaving = true;
+    profileError = "";
+    const input: { display_name?: string; email?: string } = {};
+    if (profileName.trim() !== user.display_name) input.display_name = profileName.trim();
+    if (profileEmail.trim().toLowerCase() !== user.email) input.email = profileEmail.trim();
+    const res = await updateProfile(input);
+    profileSaving = false;
+    if (res.ok) {
+      user = res.data;
+      profileName = res.data.display_name;
+      profileEmail = res.data.email;
+      profileSavedAt = Date.now();
+      window.setTimeout(() => { if (Date.now() - profileSavedAt >= 1900) profileSavedAt = 0; }, 2000);
+    } else {
+      profileError = res.error;
+    }
+  }
+
+  function pickTheme(p: ThemePreference) {
+    themePref = p;
+    setPreference(p);
+  }
+
+  async function submitPassword() {
+    if (pwSaving) return;
+    pwError = ""; pwSuccess = false;
+    if (newPw.length < 8) { pwError = "New password must be at least 8 characters."; return; }
+    pwSaving = true;
+    const res = await changePassword({ current_password: curPw, new_password: newPw });
+    pwSaving = false;
+    if (res.ok) {
+      pwSuccess = true;
+      curPw = ""; newPw = "";
+      window.setTimeout(() => { pwSuccess = false; }, 2500);
+    } else {
+      pwError = res.error;
+    }
+  }
+
+  async function signOutAll() {
+    if (signingOut) return;
+    signingOut = true;
+    await revokeAllSessions();
+    navigate("/login");
+  }
+
+  async function logoutNow() {
+    await logout();
+    clearSession();
+    navigate("/login");
+  }
 
   async function loadUser() {
     const result = await me();
     if (result.ok) {
       user = result.data;
+      profileName = result.data.display_name;
+      profileEmail = result.data.email;
       await loadBots();
     }
     loading = false;
   }
-
   async function loadBots() {
     const result = await listBots();
     if (result.ok) bots = result.data;
-  }
-
-  function startConnect(template: ToolTemplate) {
-    selectedTool = template;
-    createdKey = null;
-    connectError = "";
-  }
-
-  function cancelConnect() {
-    selectedTool = null;
-    createdKey = null;
-    connectError = "";
-  }
-
-  async function confirmConnect() {
-    if (!selectedTool) return;
-    connecting = true;
-    connectError = "";
-
-    const result = await createBot(selectedTool.id);
-    if (result.ok) {
-      createdKey = result.data.key;
-      await loadBots();
-    } else {
-      connectError = result.error;
-    }
-    connecting = false;
-  }
-
-  async function handleDisconnect(id: number) {
-    disconnectingId = id;
-    await disconnectBot(id);
-    await loadBots();
-    disconnectingId = null;
-  }
-
-  async function handleDelete(id: number) {
-    deletingId = id;
-    await deleteBot(id);
-    await loadBots();
-    deletingId = null;
-  }
-
-  function initials(name: string): string {
-    return name
-      .split(/[\s_-]+/)
-      .slice(0, 2)
-      .map((w) => w[0]?.toUpperCase() ?? "")
-      .join("");
-  }
-
-  function formatDate(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
   }
 
   function getToolBot(toolId: string): Bot | undefined {
     if (!user) return undefined;
     return bots.find((b) => b.username === `${toolId}-${user!.username}`);
   }
-
-  function isToolConnected(toolId: string): boolean {
+  function toolState(toolId: string): "connected" | "disconnected" | "none" {
     const bot = getToolBot(toolId);
-    return !!bot && bot.has_active_key;
+    if (!bot) return "none";
+    return bot.has_active_key ? "connected" : "disconnected";
   }
 
-  function isToolDisconnected(toolId: string): boolean {
-    const bot = getToolBot(toolId);
-    return !!bot && !bot.has_active_key;
+  // Open the modal and mint credentials in one step (no extra confirm).
+  async function openConnect(template: ToolTemplate) {
+    connectTool = template;
+    connectKey = null;
+    connectError = "";
+    copied = false;
+    connecting = true;
+    const res = await createBot(template.id);
+    if (res.ok) {
+      connectKey = res.data.key;
+      await loadBots();
+    } else {
+      connectError = res.error;
+    }
+    connecting = false;
+  }
+  function closeConnect() {
+    connectTool = null;
+    connectKey = null;
+    connectError = "";
+    connecting = false;
+  }
+
+  function configText(): string {
+    if (!connectTool || !connectKey) return "";
+    return connectTool.generateConfig(window.location.origin + "/mcp", connectKey);
+  }
+  async function copyConfig() {
+    try {
+      await navigator.clipboard.writeText(configText());
+      copied = true;
+      window.setTimeout(() => { copied = false; }, 1500);
+    } catch { /* clipboard blocked */ }
+  }
+
+  async function handleDisconnect(id: number) {
+    busyId = id;
+    await disconnectBot(id);
+    await loadBots();
+    busyId = null;
+  }
+  async function handleRemove(id: number) {
+    busyId = id;
+    await deleteBot(id);
+    await loadBots();
+    busyId = null;
+  }
+
+  function initials(name: string): string {
+    return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
   }
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === "Escape" && connectTool) closeConnect(); }} />
+
 {#snippet topbarContent()}
   <div class="flex items-center gap-3 px-6 py-2 w-full">
-    <div class="flex items-center gap-1.5 shrink-0">
-      <span class="text-[0.8125rem] font-medium text-[var(--text)]">
-        Settings
-      </span>
-    </div>
+    <span class="text-[0.8125rem] font-medium text-[var(--text)]">Settings</span>
   </div>
 {/snippet}
 
-<div class="flex-1 flex justify-center px-6 py-10 md:py-16">
-  {#if loading}
-    <div class="flex items-center justify-center py-20">
-      <div
-        class="size-6 rounded-full border-2 border-[var(--border)]
-               border-t-[var(--accent)] animate-spin"
-      ></div>
-    </div>
-  {:else if user}
-    <div class="w-full max-w-[600px]">
-      <!-- User info -->
-      <section class="mb-10 animate-reveal delay-100">
-        <div class="mb-6">
-          <span
-            class="block text-[0.8125rem] font-medium uppercase
-                   tracking-widest text-[var(--text-muted)] mb-1"
-          >
-            Signed in as
-          </span>
-          <h1
-            class="font-display text-[clamp(1.75rem,4vw,2.25rem)]
-                   tracking-tight text-[var(--text)]"
-          >
+<div class="flex-1 overflow-y-auto">
+  <div class="w-full max-w-[1000px] mx-auto px-6 py-10 md:py-12">
+    {#if loading}
+      <div class="flex items-center justify-center py-20">
+        <div class="size-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
+      </div>
+    {:else if user}
+      <!-- ── IDENTITY HERO (read-only) ────────────────── -->
+      <section class="flex items-center gap-4 mb-8 animate-reveal delay-100">
+        <div class="size-14 shrink-0 rounded-full bg-[var(--accent)] text-[var(--accent-text)] grid place-items-center font-display text-[1.25rem] tracking-tight">
+          {initials(user.display_name || user.username)}
+        </div>
+        <div class="min-w-0">
+          <h1 class="font-display text-[1.5rem] tracking-tight text-[var(--text)] leading-none truncate">
             {user.display_name || user.username}
           </h1>
-        </div>
-
-        <div
-          class="grid grid-cols-3 max-sm:grid-cols-1
-                 gap-px bg-[var(--border)] border border-[var(--border)]
-                 rounded-md overflow-hidden"
-        >
-          {#each [
-            { label: "Username", value: user.username },
-            { label: "Email", value: user.email },
-            { label: "Role", value: user.is_admin ? "Admin" : "Member" },
-          ] as item}
-            <div class="bg-[var(--surface)] p-4">
-              <span
-                class="block text-[0.6875rem] font-medium uppercase
-                       tracking-widest text-[var(--text-faint)] mb-1"
-              >
-                {item.label}
-              </span>
-              <span class="text-[0.9375rem] font-medium text-[var(--text)]">
-                {item.value}
-              </span>
-            </div>
-          {/each}
+          <div class="flex items-center gap-2 mt-1.5 flex-wrap text-[0.8125rem]">
+            <span class="font-mono text-[var(--text-muted)]">@{user.username}</span>
+            <span class="text-[var(--text-faint)]">·</span>
+            <span class="text-[var(--text-muted)]">{user.email}</span>
+            <span class="text-[0.6875rem] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full
+                         {user.is_admin ? 'text-[var(--accent)] bg-[var(--accent-subtle)]' : 'text-[var(--text-muted)] bg-[var(--bg-subtle)]'}">
+              {user.is_admin ? "Admin" : "Member"}
+            </span>
+          </div>
         </div>
       </section>
 
-      <!-- Connected Tools -->
-      <section class="animate-reveal delay-250">
-        <div class="mb-6">
-          <h2 class="font-display text-[1.375rem] text-[var(--text)] mb-1">
-            Connected Tools
-          </h2>
-          <p class="text-[0.875rem] text-[var(--text-muted)]">
-            Link your AI coding tools to Lific. Each connection creates a bot identity that acts on your behalf.
-          </p>
-        </div>
+      <!-- ── DASHBOARD GRID ───────────────────────────── -->
+      <div class="grid lg:grid-cols-2 gap-5 animate-reveal delay-250">
 
-        <!-- Connection flow overlay -->
-        {#if selectedTool}
-          <div
-            class="border border-[var(--border)] rounded-md p-5 mb-6
-                   bg-[var(--surface)]"
-          >
-            {#if createdKey}
-              <div class="mb-4">
-                <h3 class="text-[0.9375rem] font-semibold text-[var(--text)] mb-1">
-                  {selectedTool.name} connected
-                </h3>
-                <p class="text-[0.8125rem] text-[var(--text-muted)]">
-                  Add this to <code class="font-mono text-[0.8125rem] bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded">{selectedTool.configPath}</code>
-                </p>
-                {#if selectedTool.configNote}
-                  <p class="text-[0.75rem] text-[var(--text-faint)] mt-1">
-                    {selectedTool.configNote}
-                  </p>
-                {/if}
-              </div>
-
-              <div class="relative">
-                <pre
-                  class="bg-[var(--bg)] border border-[var(--border)] rounded-md
-                         p-4 text-[0.8125rem] font-mono text-[var(--text)]
-                         overflow-x-auto leading-relaxed"
-                >{selectedTool.generateConfig(window.location.origin + "/mcp", createdKey)}</pre>
-                <button
-                  class="absolute top-2 right-2 text-[0.6875rem] font-semibold
-                         uppercase tracking-wider text-[var(--accent)] px-2 py-1
-                         rounded bg-[var(--surface)] border border-[var(--border)]
-                         hover:bg-[var(--accent-subtle)] transition-colors"
-                  onclick={() =>
-                    navigator.clipboard.writeText(
-                      selectedTool!.generateConfig(
-                        window.location.origin + "/mcp",
-                        createdKey!
-                      )
-                    )
-                  }
-                >
-                  Copy
-                </button>
-              </div>
-
-              <div
-                class="mt-4 text-[0.8125rem] text-[var(--success)] bg-[var(--success-bg)]
-                       px-3 py-2 rounded-md border-l-[3px] border-[var(--success)]"
-              >
-                Save this configuration now. The API key won't be shown again.
-              </div>
-
-              <button
-                class="mt-4 text-[0.8125rem] text-[var(--text-muted)]
-                       hover:text-[var(--text)] transition-colors"
-                onclick={cancelConnect}
-              >
-                Done
-              </button>
-            {:else}
-              <h3 class="text-[0.9375rem] font-semibold text-[var(--text)] mb-1">
-                Connect {selectedTool.name}
-              </h3>
-              <p class="text-[0.8125rem] text-[var(--text-muted)] mb-4">
-                This will create a bot account for {selectedTool.name} that can manage issues, comments, and pages on your behalf.
-              </p>
-
-              {#if connectError}
-                <div
-                  class="text-sm text-[var(--error)] bg-[var(--error-bg)]
-                         px-4 py-2 rounded-md border-l-[3px] border-[var(--error)] mb-4"
-                  role="alert"
-                >
-                  {connectError}
-                </div>
-              {/if}
-
-              <div class="flex gap-3">
-                <button
-                  class="rounded-md bg-[var(--accent)] text-[var(--accent-text)]
-                         text-[0.875rem] font-medium px-4 py-2
-                         transition-all duration-200
-                         hover:bg-[var(--accent-hover)] active:scale-[0.98]
-                         disabled:opacity-60 disabled:cursor-not-allowed"
-                  disabled={connecting}
-                  onclick={confirmConnect}
-                >
-                  {connecting ? "Connecting..." : "Connect"}
-                </button>
-                <button
-                  class="rounded-md text-[0.875rem] text-[var(--text-muted)]
-                         px-4 py-2 hover:bg-[var(--bg-subtle)] transition-colors"
-                  onclick={cancelConnect}
-                >
-                  Cancel
-                </button>
-              </div>
+        <!-- Profile (proper labeled form) -->
+        <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
+          <h2 class="text-[0.9375rem] font-semibold text-[var(--text)] mb-3.5">Profile</h2>
+          <div class="flex flex-col gap-3.5">
+            <label class="block">
+              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Display name</span>
+              <input
+                bind:value={profileName}
+                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              />
+            </label>
+            <label class="block">
+              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Email</span>
+              <input
+                bind:value={profileEmail}
+                type="email"
+                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              />
+            </label>
+            <div>
+              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Username</span>
+              <p class="text-[0.875rem] font-mono text-[var(--text-muted)]">@{user.username}</p>
+            </div>
+          </div>
+          {#if profileError}
+            <p class="text-[0.75rem] text-[var(--error)] mt-2.5 flex items-center gap-1"><AlertTriangle size={12} /> {profileError}</p>
+          {/if}
+          <div class="flex items-center gap-3 mt-4">
+            <button
+              class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
+                     hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!hasProfileChanges || profileSaving}
+              onclick={saveProfile}
+            >
+              {profileSaving ? "Saving…" : "Save changes"}
+            </button>
+            {#if profileSavedAt}
+              <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]" aria-live="polite"><Check size={13} /> Saved</span>
             {/if}
           </div>
-        {/if}
+        </section>
 
-        <!-- Tool grid -->
-        <div class="grid grid-cols-2 max-sm:grid-cols-1 gap-3 mb-6">
-          {#each TOOL_TEMPLATES as template (template.id)}
-            {@const connected = isToolConnected(template.id)}
-            {@const disconnected = isToolDisconnected(template.id)}
-            <button
-              class="text-left p-4 rounded-md border transition-all duration-200
-                     {connected
-                ? 'border-[var(--success)] bg-[var(--success-bg)]'
-                : disconnected
-                  ? 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] hover:shadow-sm border-dashed'
-                  : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] hover:shadow-sm'}
-                     disabled:opacity-50"
-              disabled={connected || !!selectedTool}
-              onclick={() => startConnect(template)}
-            >
-              <div class="flex items-center justify-between mb-1">
-                <span class="text-[0.9375rem] font-medium text-[var(--text)]">
-                  {template.name}
-                </span>
-                {#if connected}
-                  <span
-                    class="text-[0.6875rem] font-semibold uppercase tracking-wide
-                           text-[var(--success)]"
-                  >
-                    Connected
-                  </span>
-                {:else if disconnected}
-                  <span
-                    class="text-[0.6875rem] font-semibold uppercase tracking-wide
-                           text-[var(--text-faint)]"
-                  >
-                    Reconnect
-                  </span>
-                {/if}
-              </div>
-              <span class="text-[0.8125rem] text-[var(--text-muted)]">
-                {template.description}
-              </span>
-            </button>
-          {/each}
-        </div>
-
-        <!-- Active connections list -->
-        {#if bots.length > 0}
-          <div class="mt-8">
-            <h3
-              class="text-[0.8125rem] font-medium uppercase tracking-widest
-                     text-[var(--text-faint)] mb-3"
-            >
-              Active connections
-            </h3>
-            <div class="border border-[var(--border)] rounded-md overflow-hidden">
-              {#each bots as bot, i (bot.id)}
-                <div
-                  class="flex items-center justify-between px-4 py-3
-                         bg-[var(--surface)] gap-4
-                         {i > 0 ? 'border-t border-[var(--border)]' : ''}"
-                  class:opacity-50={!bot.has_active_key}
+        <!-- Right column: Appearance + Security stacked -->
+        <div class="flex flex-col gap-5">
+          <!-- Appearance -->
+          <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
+            <div class="flex items-center gap-2 mb-1">
+              <Palette size={15} class="text-[var(--text-muted)]" />
+              <h2 class="text-[0.9375rem] font-semibold text-[var(--text)]">Appearance</h2>
+            </div>
+            <p class="text-[0.8125rem] text-[var(--text-muted)] mb-3.5">System follows your OS.</p>
+            <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
+              {#each [["light", "Light", Sun], ["dark", "Dark", Moon], ["system", "System", Monitor]] as [val, label, Icon]}
+                {@const IconComp = Icon as typeof Sun}
+                <button
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.8125rem] font-medium transition-all
+                         {themePref === val
+                    ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+                  onclick={() => pickTheme(val as ThemePreference)}
                 >
-                  <div class="flex flex-col gap-0.5 min-w-0">
-                    <div class="flex items-center gap-2">
-                      <span class="text-[0.9375rem] font-medium text-[var(--text)] truncate">
-                        {bot.display_name}
-                      </span>
-                      <span class="text-[0.75rem] text-[var(--text-faint)]">
-                        {bot.username}
-                      </span>
-                    </div>
-                    <span class="text-[0.75rem] text-[var(--text-faint)] flex items-center gap-2">
-                      Connected {formatDate(bot.created_at)}
-                      {#if bot.has_active_key}
-                        <span
-                          class="text-[0.6875rem] font-semibold uppercase tracking-wide
-                                 text-[var(--success)] bg-[var(--success-bg)]
-                                 px-1.5 py-0.5 rounded"
-                        >
-                          Active
-                        </span>
-                      {:else}
-                        <span
-                          class="text-[0.6875rem] font-semibold uppercase tracking-wide
-                                 text-[var(--error)] bg-[var(--error-bg)]
-                                 px-1.5 py-0.5 rounded"
-                        >
-                          Disconnected
-                        </span>
-                      {/if}
-                    </span>
-                  </div>
-                  <div class="flex items-center gap-2 shrink-0">
-                    {#if bot.has_active_key}
-                      <button
-                        class="text-[0.8125rem] text-[var(--error)]
-                               px-2 py-1 rounded transition-colors
-                               hover:bg-[var(--error-bg)]
-                               disabled:opacity-50 disabled:cursor-not-allowed"
-                        disabled={disconnectingId === bot.id}
-                        onclick={() => handleDisconnect(bot.id)}
-                      >
-                        {disconnectingId === bot.id ? "..." : "Disconnect"}
-                      </button>
-                    {:else}
-                      <button
-                        class="text-[0.8125rem] text-[var(--error)]
-                               px-2 py-1 rounded transition-colors
-                               hover:bg-[var(--error-bg)]
-                               disabled:opacity-50 disabled:cursor-not-allowed"
-                        disabled={deletingId === bot.id}
-                        onclick={() => handleDelete(bot.id)}
-                      >
-                        {deletingId === bot.id ? "..." : "Remove"}
-                      </button>
-                    {/if}
-                  </div>
-                </div>
+                  <IconComp size={14} />
+                  {label}
+                </button>
               {/each}
             </div>
+          </section>
+
+          <!-- Security -->
+          <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
+            <div class="flex items-center gap-2 mb-3.5">
+              <Lock size={15} class="text-[var(--text-muted)]" />
+              <h2 class="text-[0.9375rem] font-semibold text-[var(--text)]">Security</h2>
+            </div>
+            <div class="flex flex-col gap-2.5">
+              <input
+                type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password"
+                class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              />
+              <input
+                type="password" bind:value={newPw} placeholder="New password (min 8 chars)" autocomplete="new-password"
+                class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
+              />
+            </div>
+            {#if pwError}
+              <p class="text-[0.75rem] text-[var(--error)] mt-2 flex items-center gap-1"><AlertTriangle size={12} /> {pwError}</p>
+            {/if}
+            <div class="flex items-center gap-3 mt-3">
+              <button
+                class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
+                       hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={pwSaving || !curPw || !newPw}
+                onclick={submitPassword}
+              >
+                {pwSaving ? "Updating…" : "Change password"}
+              </button>
+              {#if pwSuccess}
+                <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]"><Check size={13} /> Changed</span>
+              {/if}
+            </div>
+            <div class="border-t border-[var(--border)] mt-4 pt-4 flex flex-wrap items-center gap-2">
+              <button
+                class="inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-[var(--text)]
+                       border border-[var(--border)] px-3 py-1.5 rounded-md
+                       hover:bg-[var(--bg-subtle)] transition-colors"
+                onclick={logoutNow}
+              >
+                <LogOut size={14} />
+                Sign out
+              </button>
+              <button
+                class="inline-flex items-center gap-1.5 text-[0.8125rem] text-[var(--error)] border border-[var(--error)]
+                       px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
+                disabled={signingOut}
+                onclick={signOutAll}
+              >
+                {signingOut ? "Signing out…" : "Sign out of all sessions"}
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ── CONNECTED TOOLS (full width) ─────────────── -->
+      <section class="mt-10 animate-reveal delay-250">
+        <div class="flex items-center gap-2 mb-1">
+          <Plug size={16} class="text-[var(--text-muted)]" />
+          <h2 class="text-[1rem] font-semibold text-[var(--text)]">Connected tools</h2>
+        </div>
+        <p class="text-[0.875rem] text-[var(--text-muted)] mb-5 leading-relaxed">
+          Link an AI coding tool to Lific over MCP. Each connection mints a bot identity that acts on your behalf — disconnect any time.
+        </p>
+
+        <div class="grid sm:grid-cols-2 gap-2.5">
+          {#each TOOL_TEMPLATES as template (template.id)}
+            {@const st = toolState(template.id)}
+            {@const bot = getToolBot(template.id)}
+            <div class="flex items-center gap-3.5 p-3.5 rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+              <div class="size-10 shrink-0 rounded-lg bg-[var(--bg-subtle)] grid place-items-center text-[var(--text)]">
+                <ToolIcon tool={template.id} size={20} />
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-[0.875rem] font-medium text-[var(--text)]">{template.name}</span>
+                  {#if st === "connected"}
+                    <span class="inline-flex items-center gap-1 text-[0.625rem] font-semibold uppercase tracking-wide
+                                 text-[var(--success)] bg-[var(--success-bg)] px-1.5 py-0.5 rounded-full">
+                      <span class="size-1.5 rounded-full bg-[var(--success)]"></span> Connected
+                    </span>
+                  {:else if st === "disconnected"}
+                    <span class="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] px-1.5 py-0.5 rounded-full">
+                      Disconnected
+                    </span>
+                  {/if}
+                </div>
+                <p class="text-[0.75rem] text-[var(--text-muted)] truncate mt-0.5">{template.description}</p>
+              </div>
+              <div class="shrink-0 flex items-center gap-1.5">
+                {#if st === "connected" && bot}
+                  <button
+                    class="text-[0.8125rem] text-[var(--text-muted)] hover:text-[var(--error)] px-2.5 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
+                    disabled={busyId === bot.id}
+                    onclick={() => handleDisconnect(bot.id)}
+                  >
+                    {busyId === bot.id ? "…" : "Disconnect"}
+                  </button>
+                {:else if st === "disconnected" && bot}
+                  <button
+                    class="text-[0.8125rem] text-[var(--text-faint)] hover:text-[var(--error)] px-2 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
+                    disabled={busyId === bot.id}
+                    onclick={() => handleRemove(bot.id)}
+                  >
+                    Remove
+                  </button>
+                  <button
+                    class="flex items-center gap-1.5 text-[0.8125rem] font-medium text-[var(--btn-success-text)]
+                           bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+                    onclick={() => openConnect(template)}
+                  >
+                    Reconnect
+                  </button>
+                {:else}
+                  <button
+                    class="flex items-center gap-1.5 text-[0.8125rem] font-medium text-[var(--btn-success-text)]
+                           bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
+                           motion-safe:active:scale-[0.97]"
+                    onclick={() => openConnect(template)}
+                  >
+                    Connect
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+  </div>
+</div>
+
+<!-- ── CONNECT MODAL ──────────────────────────────────── -->
+{#if connectTool}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" onclick={closeConnect}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div
+      class="w-full max-w-[540px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl
+             max-h-[85vh] overflow-y-auto"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <!-- Header -->
+      <div class="flex items-center gap-3 px-5 py-4 border-b border-[var(--border)]">
+        <div class="size-9 shrink-0 rounded-lg bg-[var(--bg-subtle)] grid place-items-center text-[var(--text)]">
+          <ToolIcon tool={connectTool.id} size={18} />
+        </div>
+        <div class="flex-1 min-w-0">
+          <h3 class="text-[0.9375rem] font-semibold text-[var(--text)] leading-tight">Connect {connectTool.name}</h3>
+          <p class="text-[0.75rem] text-[var(--text-faint)] truncate">{connectTool.description}</p>
+        </div>
+        <button class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors" onclick={closeConnect} aria-label="Close">
+          <X size={16} />
+        </button>
+      </div>
+
+      <div class="p-5">
+        {#if connecting}
+          <div class="flex items-center gap-3 py-8 justify-center text-[var(--text-muted)]">
+            <div class="size-5 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
+            <span class="text-[0.875rem]">Minting credentials…</span>
+          </div>
+        {:else if connectError}
+          <div class="flex items-start gap-2.5 text-[0.875rem] text-[var(--error)] bg-[var(--error-bg)] px-3.5 py-3 rounded-md" role="alert">
+            <AlertTriangle size={16} class="shrink-0 mt-0.5" />
+            <span>{connectError}</span>
+          </div>
+        {:else if connectKey}
+          <p class="text-[0.8125rem] text-[var(--text-muted)] mb-1">
+            Add this to <code class="font-mono text-[0.75rem] bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded text-[var(--text)]">{connectTool.configPath}</code>
+          </p>
+          {#if connectTool.configNote}
+            <p class="text-[0.75rem] text-[var(--text-faint)] mb-3 leading-relaxed">{connectTool.configNote}</p>
+          {/if}
+
+          <div class="relative">
+            <pre class="bg-[var(--bg)] border border-[var(--border)] rounded-lg p-3.5 pr-12 text-[0.75rem] font-mono text-[var(--text)] overflow-x-auto leading-relaxed">{configText()}</pre>
+            <button
+              class="absolute top-2 right-2 inline-flex items-center gap-1 text-[0.6875rem] font-semibold
+                     px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--border)]
+                     {copied ? 'text-[var(--success)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'} transition-colors"
+              onclick={copyConfig}
+            >
+              {#if copied}<Check size={12} /> Copied{:else}<Copy size={12} /> Copy{/if}
+            </button>
+          </div>
+
+          <div class="mt-3 flex items-start gap-2 text-[0.75rem] text-[var(--warn)]">
+            <AlertTriangle size={14} class="shrink-0 mt-0.5" />
+            <span>Copy this now — the API key won't be shown again. You can always reconnect to mint a fresh one.</span>
           </div>
         {/if}
-      </section>
+      </div>
+
+      <div class="flex justify-end px-5 py-3.5 border-t border-[var(--border)]">
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-4 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={closeConnect}
+        >
+          Done
+        </button>
+      </div>
     </div>
-  {/if}
-</div>
+  </div>
+{/if}

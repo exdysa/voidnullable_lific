@@ -19,6 +19,7 @@
     FolderClosed,
     Plus,
     ChevronRight,
+    ChevronDown,
     Trash2,
     X,
     Search,
@@ -26,9 +27,15 @@
     CircleDot,
     CheckCircle2,
     Archive,
+    Pin,
+    PinOff,
+    FolderPlus,
+    ClipboardPaste,
+    NotebookPen,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
+  import Mascot from "../lib/Mascot.svelte";
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import { getContext } from "svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
@@ -94,9 +101,21 @@
   let draggedId = $state<{ type: "page"; id: number } | null>(null);
   let dropTarget = $state<number | "root" | null>(null);
 
-  // Inline create
-  let createTarget = $state<{ type: "page" | "folder"; parentId: number | null } | null>(null);
+  // Inline create. `status` (pages only) lets the "New page as …" menu
+  // presets seed the lifecycle status the inline row will commit with.
+  let createTarget = $state<{
+    type: "page" | "folder";
+    parentId: number | null;
+    status?: string;
+  } | null>(null);
   let createName = $state("");
+
+  // Split "New" button caret menu (folder / paste / quick note / status).
+  let newMenuOpen = $state(false);
+
+  // LIF-185: folder focus. When set (via the right sidebar), the main tree
+  // shows only that folder's subtree. null = show everything.
+  let focusedFolderId = $state<number | null>(null);
 
   // LIF-105: server-side label filter. Empty string = no filter (mirrors
   // the issue list's filterLabel convention).
@@ -114,6 +133,21 @@
 
   function statusMeta(value: string) {
     return PAGE_STATUSES.find((s) => s.value === value) ?? PAGE_STATUSES[0];
+  }
+
+  // Status → leading-icon color so the page icon actually carries meaning
+  // (it used to be an identical FileText on every row).
+  function statusColor(status: string): string {
+    switch (status) {
+      case "active":
+        return "var(--accent)";
+      case "complete":
+        return "var(--success)";
+      case "archived":
+        return "var(--text-faint)";
+      default: // draft
+        return "var(--text-muted)";
+    }
   }
 
   // Filter dropdown options. The leading entry is the default "hide
@@ -289,7 +323,12 @@
   }
 
   function pagesInFolder(folderId: number | null): Page[] {
-    return visiblePages.filter((p) => (p.folder_id ?? null) === folderId);
+    // Newest first so a freshly created page lands at the top of its level
+    // instead of the bottom (pages share a default sort_order, so the old
+    // id-ASC tiebreak buried new docs under everything else).
+    return visiblePages
+      .filter((p) => (p.folder_id ?? null) === folderId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   function toggleFolder(id: number) {
@@ -301,7 +340,79 @@
 
   function contentPreview(content: string): string {
     const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-    return (lines[0] ?? "").replace(/[*_`\[\]]/g, "").slice(0, 100) || "Empty page";
+    return (lines[0] ?? "").replace(/[*_`\[\]]/g, "").slice(0, 140);
+  }
+
+  // LIF-183: pinned pages, surfaced in a section above the folder tree.
+  // Pins cut across folders, so this is a flat list (most-recent first).
+  let pinnedPages = $derived(
+    visiblePages
+      .filter((p) => p.pinned)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+  );
+
+  function folderName(folderId: number | null): string | null {
+    if (folderId == null) return null;
+    return folders.find((f) => f.id === folderId)?.name ?? null;
+  }
+
+  // Depth of a folder in the hierarchy (for sidebar indentation).
+  function folderDepth(folder: Folder): number {
+    let d = 0;
+    let cur: Folder | undefined = folder;
+    while (cur && cur.parent_id != null) {
+      cur = folders.find((f) => f.id === cur!.parent_id);
+      d++;
+      if (d > 20) break; // cycle guard
+    }
+    return d;
+  }
+
+  // Folders sorted for the sidebar: a stable depth-first ordering so nested
+  // folders sit under their parent, each shown with a small indent.
+  let sidebarFolders = $derived.by(() => {
+    const out: Folder[] = [];
+    const walk = (parentId: number | null) => {
+      const kids = folders
+        .filter((f) => f.parent_id === parentId)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const f of kids) {
+        out.push(f);
+        walk(f.id);
+      }
+    };
+    walk(null);
+    return out;
+  });
+
+  // Direct (non-recursive) page count per folder, for the sidebar.
+  function folderPageCount(folderId: number | null): number {
+    return visiblePages.filter((p) => (p.folder_id ?? null) === folderId).length;
+  }
+
+  // Per-status tallies across visible pages, for the sidebar summary.
+  let statusTally = $derived.by(() => {
+    const counts: Record<string, number> = { draft: 0, active: 0, complete: 0, archived: 0 };
+    for (const p of visiblePages) counts[p.status] = (counts[p.status] ?? 0) + 1;
+    return counts;
+  });
+
+  function focusFolder(id: number | null) {
+    focusedFolderId = id;
+    searchQuery = "";
+    searchExpanded = false;
+  }
+
+  // Optimistic pin toggle. Flip locally so the row reacts instantly, then
+  // persist; on failure, revert.
+  async function togglePin(page: Page, e: Event) {
+    e.stopPropagation();
+    const next = !page.pinned;
+    pages = pages.map((p) => (p.id === page.id ? { ...p, pinned: next } : p));
+    const res = await updatePage(page.id, { pinned: next });
+    if (!res.ok) {
+      pages = pages.map((p) => (p.id === page.id ? { ...p, pinned: !next } : p));
+    }
   }
 
   function formatRelative(iso: string): string {
@@ -359,14 +470,19 @@
 
   // ── Create ───────────────────────────────────────────
 
-  function startCreate(type: "page" | "folder", parentId: number | null = null) {
-    createTarget = { type, parentId };
+  function startCreate(
+    type: "page" | "folder",
+    parentId: number | null = null,
+    status?: string,
+  ) {
+    newMenuOpen = false;
+    createTarget = { type, parentId, status };
     createName = "";
   }
 
   async function commitCreate() {
     if (!project || !createTarget || !createName.trim()) return;
-    const { type, parentId } = createTarget;
+    const { type, parentId, status } = createTarget;
     createTarget = null;
 
     if (type === "page") {
@@ -374,6 +490,7 @@
         project_id: project.id,
         title: createName.trim(),
         folder_id: parentId ?? undefined,
+        ...(status ? { status } : {}),
       });
       if (res.ok) {
         navigate(`/${projectIdentifier}/pages/${res.data.id}`);
@@ -392,6 +509,67 @@
     createName = "";
   }
 
+  // ── Page-specific quick actions (split-button menu) ──────
+
+  // Enhancement: create a page straight from the clipboard. The first
+  // non-empty line becomes the title (stripped of markdown heading/marks),
+  // the rest becomes the body — turning a copied block into a doc in one
+  // click. Falls back to the normal inline create when the clipboard is
+  // empty or unreadable (e.g. permission denied) so the action is never a
+  // dead end.
+  async function pasteAsNewPage() {
+    newMenuOpen = false;
+    if (!project) return;
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      // Clipboard blocked/unavailable — degrade to a blank create row.
+    }
+    if (!text.trim()) {
+      startCreate("page");
+      return;
+    }
+    const lines = text.split("\n");
+    const firstIdx = lines.findIndex((l) => l.trim());
+    const rawTitle = lines[firstIdx] ?? "Pasted page";
+    const title =
+      rawTitle
+        .replace(/^#+\s*/, "")
+        .replace(/[*_`>\[\]]/g, "")
+        .trim()
+        .slice(0, 120) || "Pasted page";
+    const body = lines.slice(firstIdx + 1).join("\n").trim();
+    const res = await createPage({
+      project_id: project.id,
+      title,
+      ...(focusedFolderId != null ? { folder_id: focusedFolderId } : {}),
+      ...(body ? { content: body } : {}),
+    });
+    if (res.ok) navigate(`/${projectIdentifier}/pages/${res.data.id}`);
+  }
+
+  // Enhancement: one-click dated scratch note. Creates an empty draft
+  // titled with today's date and drops you straight into the editor — for
+  // capturing a thought without naming ceremony.
+  async function quickNote() {
+    newMenuOpen = false;
+    if (!project) return;
+    const now = new Date();
+    const stamp = now.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    const res = await createPage({
+      project_id: project.id,
+      title: `Note · ${stamp}`,
+      status: "draft",
+      ...(focusedFolderId != null ? { folder_id: focusedFolderId } : {}),
+    });
+    if (res.ok) navigate(`/${projectIdentifier}/pages/${res.data.id}`);
+  }
+
   async function handleDeleteFolder(id: number, e: Event) {
     e.stopPropagation();
     await deleteFolder(id);
@@ -407,6 +585,11 @@
   }
 </script>
 
+<svelte:window
+  onclick={() => { newMenuOpen = false; }}
+  onkeydown={(e) => { if (e.key === "Escape" && newMenuOpen) newMenuOpen = false; }}
+/>
+
 {#snippet topbarContent()}
   <div class="flex items-center gap-3 px-6 py-2 w-full">
     <!-- Breadcrumb: Project > Pages -->
@@ -414,7 +597,7 @@
       <button
         class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+        onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>
@@ -556,35 +739,116 @@
       <!-- Separator -->
       <div class="w-px h-4 bg-[var(--border)] mx-1.5"></div>
 
-      <!-- Actions -->
-      <button
-        class="flex items-center gap-1 text-[0.8125rem]
-               text-[var(--text-muted)] px-2.5 py-1 rounded-md
-               hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]
-               transition-colors"
-        onclick={() => startCreate("folder")}
-      >
-        <FolderOpen size={14} />
-        Folder
-      </button>
-      <button
-        class="flex items-center gap-1 text-[0.8125rem] font-medium
-               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
-               rounded-md hover:bg-[var(--accent-hover)] transition-colors"
-        onclick={() => startCreate("page")}
-      >
-        <Plus size={14} />
-        Page
-      </button>
+      <!-- Primary action: New page. Split button — the main segment starts
+           an inline page create; the caret reveals folder creation and
+           page-specific shortcuts (paste-as-page, quick note, status
+           presets). Folds the old separate Folder button into the menu. -->
+      <div class="relative">
+        <button
+          class="group flex items-center gap-1.5 h-7 pl-2.5 pr-2
+                 text-[0.8125rem] font-medium text-[var(--btn-success-text)]
+                 bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
+                 rounded-md shadow-sm transition-colors focus:outline-none
+                 focus-visible:ring-2 focus-visible:ring-[var(--btn-success)]
+                 focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--chrome)]
+                 motion-safe:active:scale-[0.97]"
+          aria-haspopup="menu"
+          aria-expanded={newMenuOpen}
+          onclick={(e) => { e.stopPropagation(); newMenuOpen = !newMenuOpen; }}
+        >
+          <Plus size={14} />
+          New
+          <ChevronDown
+            size={14}
+            class="motion-safe:transition-transform {newMenuOpen ? 'rotate-180' : ''}"
+          />
+        </button>
+
+        {#if newMenuOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <div
+            role="menu"
+            tabindex="-1"
+            class="absolute right-0 top-full mt-1.5 z-30 w-[228px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-lg shadow-lg py-1.5"
+            onclick={(e) => e.stopPropagation()}
+          >
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={() => startCreate("page", focusedFolderId)}
+            >
+              <FileText size={14} class="text-[var(--text-muted)]" />
+              <span class="flex-1">New page</span>
+            </button>
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={() => startCreate("folder", focusedFolderId)}
+            >
+              <FolderPlus size={14} class="text-[var(--text-muted)]" />
+              <span class="flex-1">New folder</span>
+            </button>
+
+            <div class="my-1 h-px bg-[var(--border)]"></div>
+
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={pasteAsNewPage}
+            >
+              <ClipboardPaste size={14} class="text-[var(--success)]" />
+              <span class="flex-1">Paste as new page</span>
+            </button>
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={quickNote}
+            >
+              <NotebookPen size={14} class="text-[var(--success)]" />
+              <span class="flex-1">Quick note</span>
+            </button>
+
+            <div class="my-1 h-px bg-[var(--border)]"></div>
+            <div class="px-3 pb-1 pt-0.5 text-[0.625rem] uppercase tracking-widest
+                        font-semibold text-[var(--text-faint)]">
+              New page as
+            </div>
+            {#each [["draft", "Draft", PenLine], ["active", "Active", CircleDot], ["complete", "Complete", CheckCircle2]] as [value, label, Icon]}
+              {@const IconComp = Icon as typeof PenLine}
+              <button
+                role="menuitem"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                       text-[0.8125rem] text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors"
+                onclick={() => startCreate("page", focusedFolderId, value as string)}
+              >
+                <IconComp size={14} class="text-[var(--text-muted)]" />
+                <span class="flex-1">{label}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 {/snippet}
 
 <div class="h-full flex flex-col">
+ <div class="flex-1 flex min-h-0">
   <!-- Content — entire scroll area is the root drop zone -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="flex-1 overflow-y-auto"
+    class="flex-1 overflow-y-auto min-w-0"
     ondragover={(e) => {
       if (!draggedId) return;
       e.preventDefault();
@@ -610,14 +874,24 @@
         <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
       </div>
     {:else if pages.length === 0 && folders.length === 0 && !createTarget}
-      <div class="flex flex-col items-center py-16 gap-3">
-        <FileText size={32} class="text-[var(--text-faint)]" />
-        <p class="text-[0.9375rem] text-[var(--text-muted)]">No pages yet</p>
+      <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[460px] mx-auto text-center">
+        <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} />
+        <div class="flex flex-col items-center gap-1.5">
+          <p class="text-[1.0625rem] font-medium text-[var(--text)]">A blank page</p>
+          <p class="text-[0.8125rem] text-[var(--text-muted)] leading-relaxed">
+            Pages are your project's docs: specs, notes, decisions. Start the
+            first one and give the ideas a home.
+          </p>
+        </div>
         <button
-          class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+          class="flex items-center gap-1.5 mt-1 text-[0.8125rem] font-medium
+                 text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                 px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                 transition-colors"
           onclick={() => startCreate("page")}
         >
-          Create the first page
+          <Plus size={15} />
+          Create a page
         </button>
       </div>
     {:else if searchQuery.trim()}
@@ -629,7 +903,7 @@
       <div class="px-6 py-4">
         {#if filteredPages.length === 0}
           <div class="flex flex-col items-center py-16 gap-3">
-            <Search size={28} class="text-[var(--text-faint)]" />
+            <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} scale={0.16} />
             <p class="text-[0.9375rem] text-[var(--text-muted)]">
               No pages match "{searchQuery}"
             </p>
@@ -654,7 +928,9 @@
               onclick={() => navigate(`/${projectIdentifier}/pages/${hit.page.id}`)}
             >
               <div class="flex items-center gap-2">
-                <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
+                <span class="shrink-0" style="color: {statusColor(hit.page.status)}" title={hMeta.label}>
+                  <hMeta.icon size={17} />
+                </span>
                 <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
                   {hit.page.title}
                 </span>
@@ -706,19 +982,219 @@
       </div>
     {:else}
       <div class="px-6 py-4">
-        {@render treeLevel(null, 0)}
+        <!-- LIF-185: focus banner when a folder is focused from the sidebar. -->
+        {#if focusedFolderId !== null}
+          <div class="flex items-center gap-1.5 mb-4 text-[0.8125rem]">
+            <button
+              class="text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+              onclick={() => focusFolder(null)}
+            >
+              All pages
+            </button>
+            <ChevronRight size={13} class="text-[var(--text-faint)]" />
+            <span class="flex items-center gap-1.5 font-medium text-[var(--text)]">
+              <FolderOpen size={15} class="text-[var(--accent)]" />
+              {folderName(focusedFolderId)}
+            </span>
+          </div>
+        {/if}
+
+        <!-- LIF-183: Pinned section. Surfaced above the tree so key docs are
+             one glance away regardless of which folder they live in. Hidden
+             while focused on a single folder to keep that view clean. -->
+        {#if pinnedPages.length > 0 && focusedFolderId === null}
+          <section class="mb-6">
+            <div class="flex items-center gap-1.5 mb-2 px-1">
+              <Pin size={12} class="text-[var(--text-faint)]" />
+              <h2 class="text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+                Pinned
+              </h2>
+              <span class="text-[0.6875rem] text-[var(--text-faint)] tabular-nums">
+                {pinnedPages.length}
+              </span>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {#each pinnedPages as page (page.id)}
+                {@const pMeta = statusMeta(page.status)}
+                {@const fName = folderName(page.folder_id)}
+                {@const prev = contentPreview(page.content)}
+                <button
+                  class="group text-left rounded-xl bg-[var(--surface)] p-3
+                         shadow-[0_1px_2px_rgba(0,0,0,0.06)]
+                         hover:shadow-[0_6px_16px_rgba(0,0,0,0.10)]
+                         transition-all motion-safe:hover:-translate-y-0.5"
+                  onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
+                >
+                  <div class="flex items-start gap-2.5">
+                    <span
+                      class="shrink-0 mt-0.5"
+                      style="color: {statusColor(page.status)}"
+                      title={pMeta.label}
+                    >
+                      <pMeta.icon size={16} />
+                    </span>
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2">
+                        <span class="text-[0.875rem] font-medium text-[var(--text)] truncate flex-1">
+                          {page.title}
+                        </span>
+                        <span
+                          class="shrink-0 text-[var(--text-faint)] opacity-0 group-hover:opacity-100
+                                 hover:text-[var(--accent)] transition-all"
+                          role="button"
+                          tabindex="0"
+                          title="Unpin"
+                          onclick={(e) => togglePin(page, e)}
+                          onkeydown={(e) => { if (e.key === "Enter") togglePin(page, e); }}
+                        >
+                          <PinOff size={13} />
+                        </span>
+                      </div>
+                      {#if prev}
+                        <p class="text-[0.75rem] text-[var(--text-faint)] line-clamp-1 mt-0.5">{prev}</p>
+                      {/if}
+                      <div class="flex items-center gap-2 mt-1.5 text-[0.6875rem] text-[var(--text-faint)]">
+                        {#if fName}<span class="truncate">{fName}</span><span>·</span>{/if}
+                        <span class="tabular-nums shrink-0">{formatRelative(page.updated_at)}</span>
+                        {#if page.status !== "active"}
+                          <span class="flex items-center gap-1 shrink-0">
+                            <pMeta.icon size={10} /> {pMeta.label}
+                          </span>
+                        {/if}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          </section>
+        {/if}
+        {@render treeLevel(focusedFolderId)}
       </div>
     {/if}
   </div>
+
+  <!-- LIF-185: right sidebar — project page overview + folder navigator.
+       Fills the empty right space and lets you focus a single folder. -->
+  {#if !loading && !error && (pages.length > 0 || folders.length > 0)}
+    <aside
+      class="w-[260px] shrink-0 overflow-y-auto border-l border-[var(--border)]
+             bg-[var(--bg-subtle)] px-4 py-5 hidden lg:block"
+    >
+      <!-- Summary -->
+      <div class="grid grid-cols-2 gap-3 mb-5">
+        <div>
+          <p class="text-[1.375rem] font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
+            {visiblePages.length}
+          </p>
+          <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
+            {visiblePages.length === 1 ? "Page" : "Pages"}
+          </p>
+        </div>
+        <div>
+          <p class="text-[1.375rem] font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
+            {folders.length}
+          </p>
+          <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
+            {folders.length === 1 ? "Folder" : "Folders"}
+          </p>
+        </div>
+      </div>
+
+      <!-- Status breakdown -->
+      <div class="flex flex-col gap-1 mb-5">
+        {#each PAGE_STATUSES as s}
+          {#if statusTally[s.value] > 0}
+            <div class="flex items-center gap-2 text-[0.75rem]">
+              <s.icon size={13} style="color: {statusColor(s.value)}" class="shrink-0" />
+              <span class="flex-1 text-[var(--text-muted)]">{s.label}</span>
+              <span class="tabular-nums text-[var(--text-faint)]">{statusTally[s.value]}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
+
+      <div class="h-px bg-[var(--border)] -mx-4 mb-4"></div>
+
+      <!-- Folder navigator -->
+      <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2 px-1">
+        Folders
+      </p>
+      <div class="flex flex-col gap-0.5">
+        <button
+          class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[0.8125rem]
+                 transition-colors
+                 {focusedFolderId === null
+            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
+            : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
+          onclick={() => focusFolder(null)}
+        >
+          <FileText size={14} class="shrink-0 text-[var(--text-faint)]" />
+          <span class="flex-1 truncate">All pages</span>
+          <span class="tabular-nums text-[0.6875rem] text-[var(--text-faint)]">{visiblePages.length}</span>
+        </button>
+        {#each sidebarFolders as folder (folder.id)}
+          {@const depth = folderDepth(folder)}
+          <button
+            class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[0.8125rem]
+                   transition-colors
+                   {focusedFolderId === folder.id
+              ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
+              : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
+            style="padding-left: {depth * 14 + 8}px;"
+            onclick={() => focusFolder(folder.id)}
+          >
+            {#if focusedFolderId === folder.id}
+              <FolderOpen size={14} class="shrink-0 text-[var(--accent)]" />
+            {:else}
+              <FolderClosed size={14} class="shrink-0 text-[var(--text-faint)]" />
+            {/if}
+            <span class="flex-1 truncate">{folder.name}</span>
+            <span class="tabular-nums text-[0.6875rem] text-[var(--text-faint)]">
+              {folderPageCount(folder.id)}
+            </span>
+          </button>
+        {/each}
+      </div>
+    </aside>
+  {/if}
+ </div>
 </div>
 
 <!--
   Recursive tree renderer.
   Each level shows: folders at this depth, then pages at this depth, then inline create if active.
 -->
-{#snippet treeLevel(parentId: number | null, depth: number)}
+{#snippet treeLevel(parentId: number | null)}
   {@const subFolders = childFolders(parentId)}
   {@const subPages = pagesInFolder(parentId)}
+
+  <!-- Inline create row — pinned to the TOP of the level so a new page is
+       visible immediately, even in a project with hundreds of pages. -->
+  {#if createTarget && createTarget.parentId === parentId}
+    <div class="flex items-center gap-2 py-1">
+      {#if createTarget.type === "folder"}
+        <FolderOpen size={18} class="text-[var(--btn-success)] shrink-0" />
+      {:else}
+        <FileText size={18} class="text-[var(--btn-success)] shrink-0" />
+      {/if}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        type="text"
+        bind:value={createName}
+        class="flex-1 px-2 py-1 text-[0.9375rem] rounded
+               border border-[var(--btn-success)] bg-transparent
+               text-[var(--text)] outline-none"
+        placeholder={createTarget.type === "folder" ? "Folder name" : "Page title"}
+        autofocus
+        onkeydown={(e) => {
+          if (e.key === "Enter") commitCreate();
+          if (e.key === "Escape") { createTarget = null; }
+        }}
+        onblur={() => { if (!createName.trim()) createTarget = null; }}
+      />
+    </div>
+  {/if}
 
   {#each subFolders as folder (folder.id)}
     {@const isExpanded = expandedFolders.has(folder.id)}
@@ -735,7 +1211,6 @@
                {isDraggedOver
           ? 'bg-[var(--accent-subtle)] outline outline-1 outline-dashed outline-[var(--accent)]'
           : 'hover:bg-[var(--bg-subtle)]'}"
-        style="padding-left: {depth * 20 + 6}px;"
         role="button"
         tabindex="0"
         onclick={() => toggleFolder(folder.id)}
@@ -786,9 +1261,12 @@
         </div>
       </div>
 
-      <!-- Children (recursive) -->
+      <!-- Children (recursive), inset under a vertical guide line so the
+           nesting reads clearly. -->
       {#if isExpanded}
-        {@render treeLevel(folder.id, depth + 1)}
+        <div class="ml-[15px] pl-3 border-l border-[var(--border)]">
+          {@render treeLevel(folder.id)}
+        </div>
       {/if}
     </div>
   {/each}
@@ -797,99 +1275,86 @@
   {#each subPages as page (page.id)}
     {@const isDragging = draggedId?.type === "page" && draggedId.id === page.id}
     {@const sMeta = statusMeta(page.status)}
+    {@const preview = contentPreview(page.content)}
     <button
-      class="w-full flex items-center gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
+      class="w-full flex items-start gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
              text-left group transition-colors
              {isDragging ? 'opacity-40' : 'hover:bg-[var(--bg-subtle)]'}"
-      style="padding-left: {depth * 20 + 6}px;"
       onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
       draggable="true"
       ondragstart={(e) => onDragStartPage(e, page.id)}
       ondragend={onDragEnd}
     >
-      <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
-      <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
-        {page.title}
-      </span>
-
-      <!-- LIF-105: label chips. Up to 2 then a "+N" overflow, matching
-           the IssueList row layout so the visual vocabulary stays
-           consistent across both list types. -->
-      {#if page.labels.length > 0}
-        <div class="flex items-center gap-1 shrink-0">
-          {#each page.labels.slice(0, 2) as lbl}
-            {@const labelObj = labels.find((l) => l.name === lbl)}
-            <span
-              class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
-                     border border-[var(--border)]"
-              style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
-            >
-              {lbl}
-            </span>
-          {/each}
-          {#if page.labels.length > 2}
-            <span class="text-[0.6875rem] text-[var(--text-faint)]">
-              +{page.labels.length - 2}
-            </span>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- Updated time. Always visible at faint strength (it's reference
-           info, not a secret), sharpening on hover. Sits LEFT of the
-           status pill: its width is dynamic ("today" vs "May 12"), so
-           anchoring the pill at the row edge keeps pills vertically
-           aligned across rows instead of jittering with date width. -->
       <span
-        class="text-[0.8125rem] text-[var(--text-faint)] shrink-0 tabular-nums
-               group-hover:text-[var(--text-muted)] transition-colors"
+        class="shrink-0 mt-0.5"
+        style="color: {statusColor(page.status)}"
+        title={sMeta.label}
       >
-        {formatRelative(page.updated_at)}
+        <sMeta.icon size={17} />
       </span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2">
+          <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
+            {page.title}
+          </span>
 
-      <!-- LIF-112: status badge. Only rendered for non-default lifecycle
-           stages — every row carrying an identical "Active" pill was
-           noise; Draft/Complete/Archived are the actual signals. -->
-      {#if page.status !== "active"}
-        <span
-          class="flex items-center gap-1 shrink-0 text-[0.6875rem] font-medium
-                 px-1.5 py-0.5 rounded-full border border-[var(--border)]
-                 text-[var(--text-muted)]"
-          title={sMeta.label}
-        >
-          <sMeta.icon size={11} class="shrink-0" />
-          {sMeta.label}
-        </span>
-      {/if}
+          <!-- LIF-105: label chips. Up to 2 then a "+N" overflow. -->
+          {#if page.labels.length > 0}
+            <div class="flex items-center gap-1 shrink-0">
+              {#each page.labels.slice(0, 2) as lbl}
+                {@const labelObj = labels.find((l) => l.name === lbl)}
+                <span
+                  class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
+                         border border-[var(--border)]"
+                  style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+                >
+                  {lbl}
+                </span>
+              {/each}
+              {#if page.labels.length > 2}
+                <span class="text-[0.6875rem] text-[var(--text-faint)]">
+                  +{page.labels.length - 2}
+                </span>
+              {/if}
+            </div>
+          {/if}
+
+          <span
+            class="text-[0.8125rem] text-[var(--text-faint)] shrink-0 tabular-nums
+                   group-hover:text-[var(--text-muted)] transition-colors"
+          >
+            {formatRelative(page.updated_at)}
+          </span>
+
+          <!-- LIF-183: pin toggle. Always visible (accent) when pinned;
+               otherwise revealed on hover. -->
+          <span
+            class="shrink-0 transition-all
+                   {page.pinned
+              ? 'text-[var(--accent)]'
+              : 'text-[var(--text-faint)] opacity-0 group-hover:opacity-100 hover:text-[var(--accent)]'}"
+            role="button"
+            tabindex="0"
+            title={page.pinned ? "Unpin" : "Pin to top"}
+            onclick={(e) => togglePin(page, e)}
+            onkeydown={(e) => { if (e.key === "Enter") togglePin(page, e); }}
+          >
+            {#if page.pinned}
+              <Pin size={13} class="fill-current" />
+            {:else}
+              <Pin size={13} />
+            {/if}
+          </span>
+        </div>
+
+        <!-- Content preview — turns the tree into something scannable. -->
+        {#if preview}
+          <p class="text-[0.75rem] text-[var(--text-faint)] truncate mt-0.5 pr-6">
+            {preview}
+          </p>
+        {/if}
+      </div>
     </button>
   {/each}
 
-  <!-- Inline create form at this level -->
-  {#if createTarget && createTarget.parentId === parentId}
-    <div
-      class="flex items-center gap-2 py-1"
-      style="padding-left: {depth * 20 + 6}px;"
-    >
-      {#if createTarget.type === "folder"}
-        <FolderOpen size={18} class="text-[var(--accent)] shrink-0" />
-      {:else}
-        <FileText size={18} class="text-[var(--accent)] shrink-0" />
-      {/if}
-      <!-- svelte-ignore a11y_autofocus -->
-      <input
-        type="text"
-        bind:value={createName}
-        class="flex-1 px-2 py-1 text-[0.9375rem] rounded
-               border border-[var(--accent)] bg-transparent
-               text-[var(--text)] outline-none"
-        placeholder={createTarget.type === "folder" ? "Folder name" : "Page title"}
-        autofocus
-        onkeydown={(e) => {
-          if (e.key === "Enter") commitCreate();
-          if (e.key === "Escape") { createTarget = null; }
-        }}
-        onblur={() => { if (!createName.trim()) createTarget = null; }}
-      />
-    </div>
-  {/if}
 {/snippet}

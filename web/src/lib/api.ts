@@ -108,6 +108,28 @@ export async function me() {
   return request<AuthUser>("/auth/me");
 }
 
+// LIF-190: account settings.
+export async function updateProfile(input: { display_name?: string; email?: string }) {
+  return request<AuthUser>("/auth/me", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function changePassword(input: { current_password: string; new_password: string }) {
+  return request<{ ok: boolean }>("/auth/me/password", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Sign out of every session (this one too). Clears the local token. */
+export async function revokeAllSessions() {
+  const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
+  localStorage.removeItem("lific_token");
+  return result;
+}
+
 export function saveSession(token: string) {
   localStorage.setItem("lific_token", token);
 }
@@ -563,6 +585,8 @@ export interface Page {
   sort_order: number;
   /** LIF-112: lifecycle status — draft | active | complete | archived. */
   status: string;
+  /** LIF-183: pinned to the top of the page list. */
+  pinned: boolean;
   created_at: string;
   updated_at: string;
   /** LIF-105: project-scoped labels attached to this page. Always [] for
@@ -619,6 +643,8 @@ export interface UpdatePageInput {
   folder_id?: number | null;
   /** LIF-112: lifecycle status. Omitted = no change. */
   status?: string;
+  /** LIF-183: pin/unpin. Omitted = no change. */
+  pinned?: boolean;
   /** LIF-105: replace the full label set. Pass [] to clear. Omitted = no change. */
   labels?: string[];
 }

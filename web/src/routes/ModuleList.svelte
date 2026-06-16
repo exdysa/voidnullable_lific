@@ -20,9 +20,10 @@
     type Project,
   } from "../lib/api";
   import { Layers, Plus, ChevronRight, CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle } from "lucide-svelte";
-  import Tooltip from "../lib/Tooltip.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import IconPicker from "../lib/IconPicker.svelte";
+  import ProgressRing from "../lib/ProgressRing.svelte";
+  import Mascot from "../lib/Mascot.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -128,6 +129,32 @@
     return issues.filter((i) => i.module_id === moduleId).length;
   }
 
+  // Completion for a single module. Numerator = done-status issues only;
+  // denominator = every issue assigned to the module (cancelled counts in
+  // the total, per the chosen metric). frac is 0..1, guarded against /0.
+  function moduleProgress(moduleId: number): { done: number; total: number; frac: number } {
+    const mine = issues.filter((i) => i.module_id === moduleId);
+    const done = mine.filter((i) => i.status === "done").length;
+    const total = mine.length;
+    return { done, total, frac: total > 0 ? done / total : 0 };
+  }
+
+  // Portfolio rollup across every module-assigned issue — drives the hero
+  // gauge. "In flight" = modules whose lifecycle status is active.
+  let portfolio = $derived.by(() => {
+    const assigned = issues.filter((i) => i.module_id != null);
+    const total = assigned.length;
+    const done = assigned.filter((i) => i.status === "done").length;
+    const inFlight = modules.filter((m) => m.status === "active").length;
+    return {
+      total,
+      done,
+      frac: total > 0 ? done / total : 0,
+      inFlight,
+      moduleCount: modules.length,
+    };
+  });
+
   // Cheap markdown stripper: takes the first non-empty non-heading line
   // and clears the obvious inline markers. Same heuristic as PageList's
   // contentPreview so the visual texture matches.
@@ -194,7 +221,7 @@
       <button
         class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+        onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>
@@ -216,8 +243,10 @@
     <div class="ml-auto flex items-center gap-1.5 shrink-0">
       <button
         class="flex items-center gap-1 text-[0.8125rem] font-medium
-               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
-               rounded-md hover:bg-[var(--accent-hover)] transition-colors"
+               text-[var(--btn-success-text)] bg-[var(--btn-success)]
+               px-2.5 py-1 rounded-md hover:bg-[var(--btn-success-hover)]
+               transition-colors focus:outline-none
+               motion-safe:active:scale-[0.97]"
         onclick={startCreate}
       >
         <Plus size={14} />
@@ -241,31 +270,59 @@
         <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
       </div>
     {:else if modules.length === 0 && !creating}
-      <!-- Empty state. Same vocabulary as the PageList empty state so the
-           first-time-into-a-tab feel is consistent. -->
-      <div class="flex flex-col items-center py-20 gap-3 px-6 max-w-[480px] mx-auto text-center">
-        <Layers size={32} class="text-[var(--text-faint)]" />
-        <p class="text-[0.9375rem] text-[var(--text-muted)]">No modules yet</p>
-        <p class="text-[0.8125rem] text-[var(--text-faint)] leading-relaxed">
-          Modules group related issues into a single arc of work — a feature,
-          a release, an effort. Create one to start organizing.
-        </p>
+      <!-- Empty state — mascot + charming copy + green CTA, matching the
+           issue-list empty state vocabulary. -->
+      <div class="flex flex-col items-center py-20 gap-4 px-6 max-w-[480px] mx-auto text-center">
+        <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.25} />
+        <div class="flex flex-col items-center gap-1.5">
+          <p class="text-[1.0625rem] font-medium text-[var(--text)]">No moving parts yet</p>
+          <p class="text-[0.8125rem] text-[var(--text-muted)] leading-relaxed">
+            Modules gather related issues into a single arc of work: a feature,
+            a release, an effort. Spin one up to start organizing.
+          </p>
+        </div>
         <button
-          class="text-[0.8125rem] text-[var(--accent)] hover:underline mt-2"
+          class="flex items-center gap-1.5 mt-1 text-[0.8125rem] font-medium
+                 text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                 px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                 transition-colors"
           onclick={startCreate}
         >
-          Create the first module
+          <Plus size={15} />
+          Create a module
         </button>
       </div>
     {:else}
-      <div class="max-w-[860px] mx-auto px-6 py-6">
+      <div class="max-w-[1100px] mx-auto px-6 py-6">
+        <!-- Portfolio hero: aggregate completion gauge + headline tallies.
+             The dashboard "moment" unique to the Modules surface. -->
+        <div
+          class="mb-7 rounded-xl bg-[var(--surface)] p-5
+                 shadow-[0_1px_2px_rgba(0,0,0,0.06)]
+                 flex items-center gap-6 flex-wrap"
+        >
+          <ProgressRing
+            value={portfolio.frac}
+            size={116}
+            stroke={9}
+            color="var(--success)"
+          />
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-8 gap-y-3 flex-1 min-w-[240px]">
+            {@render heroStat(portfolio.moduleCount, "Modules")}
+            {@render heroStat(portfolio.inFlight, "In flight")}
+            {@render heroStat(portfolio.total, "Issues")}
+            {@render heroStat(portfolio.done, "Completed")}
+          </div>
+        </div>
+
         <!-- Inline-create row. Lives outside any status group because the
              user hasn't picked a status yet — defaults to Active on commit. -->
         {#if creating}
           <div
             bind:this={createRowEl}
-            class="mb-6 flex items-center gap-3 p-3 rounded-md border
-                   border-[var(--accent)] bg-[var(--accent-subtle)]"
+            class="mb-6 flex items-center gap-3 p-3 rounded-xl
+                   border-l-2 border-l-[var(--btn-success)]
+                   bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
           >
             <IconPicker
               value={createEmoji}
@@ -301,6 +358,7 @@
         {/if}
 
         {#each grouped as group (group.status)}
+          {@const isActive = group.status === "active"}
           <section class="mb-8 last:mb-0">
             <!-- Group header. Same uppercase-tracking treatment used by
                  IssueList's status group headers and the sidebar section
@@ -318,52 +376,71 @@
               </span>
             </div>
 
-            <div class="flex flex-col gap-1">
+            <!-- Bento grid of ring-tiles. The Active group reads as the
+                 focal lane: larger rings, two-up at most so each tile has
+                 room; other lifecycle groups pack three-up. -->
+            <div
+              class="grid grid-cols-1 sm:grid-cols-2 gap-3
+                     {isActive ? '' : 'lg:grid-cols-3'}"
+            >
               {#each group.mods as mod (mod.id)}
-                {@const count = issueCount(mod.id)}
+                {@const prog = moduleProgress(mod.id)}
                 {@const preview = descriptionPreview(mod.description)}
+                {@const ringSize = isActive ? 60 : 48}
                 <button
-                  class="text-left rounded-md border border-[var(--border)]
-                         bg-[var(--surface)] px-4 py-3
-                         hover:border-[var(--text-faint)]
-                         hover:shadow-[0_1px_2px_rgba(0,0,0,0.04)]
-                         transition-all"
+                  class="group text-left rounded-xl bg-[var(--surface)] p-4
+                         shadow-[0_1px_2px_rgba(0,0,0,0.06)]
+                         hover:shadow-[0_6px_16px_rgba(0,0,0,0.10)]
+                         transition-all motion-safe:hover:-translate-y-0.5"
                   onclick={() =>
                     navigate(`/${projectIdentifier}/modules/${mod.id}`)}
                 >
-                  <div class="flex items-start gap-3">
-                    {#if mod.emoji}
-                      <span class="shrink-0 mt-0.5 size-[18px] flex items-center justify-center text-[var(--text-muted)]">
-                        <ProjectIcon value={mod.emoji} size={18} />
-                      </span>
-                    {:else}
-                      <Layers size={18} class="shrink-0 text-[var(--text-faint)] mt-0.5" />
-                    {/if}
+                  <div class="flex items-start gap-3.5">
+                    <ProgressRing
+                      value={prog.frac}
+                      size={ringSize}
+                      stroke={isActive ? 5 : 4}
+                      color="var(--success)"
+                    >
+                      {#snippet label()}
+                        {#if prog.total > 0}
+                          <span
+                            class="font-semibold tabular-nums text-[var(--text)] leading-none"
+                            style="font-size: {Math.round(ringSize * 0.26)}px;"
+                          >
+                            {Math.round(prog.frac * 100)}<span class="text-[0.7em] text-[var(--text-muted)]">%</span>
+                          </span>
+                        {:else if mod.emoji}
+                          <ProjectIcon value={mod.emoji} size={isActive ? 22 : 18} class="text-[var(--text-faint)]" />
+                        {:else}
+                          <Layers size={isActive ? 20 : 16} class="text-[var(--text-faint)]" />
+                        {/if}
+                      {/snippet}
+                    </ProgressRing>
+
                     <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-2">
+                      <div class="flex items-center gap-1.5">
+                        {#if mod.emoji}
+                          <span class="shrink-0 text-[var(--text-muted)]">
+                            <ProjectIcon value={mod.emoji} size={15} />
+                          </span>
+                        {/if}
                         <span class="text-[0.9375rem] font-medium text-[var(--text)] truncate">
                           {mod.name}
                         </span>
                       </div>
+                      <p class="text-[0.75rem] text-[var(--text-muted)] tabular-nums mt-1">
+                        {#if prog.total > 0}
+                          {prog.done}/{prog.total} done
+                        {:else}
+                          No issues yet
+                        {/if}
+                      </p>
                       {#if preview}
-                        <p class="text-[0.8125rem] text-[var(--text-muted)] truncate mt-0.5">
+                        <p class="text-[0.8125rem] text-[var(--text-faint)] line-clamp-2 mt-1.5 leading-snug">
                           {preview}
                         </p>
                       {/if}
-                    </div>
-                    <div class="shrink-0 flex flex-col items-end gap-0.5 pl-3">
-                      <Tooltip
-                        content={count === 1 ? "1 issue" : `${count} issues`}
-                        placement="left"
-                      >
-                        <span
-                          class="text-[0.75rem] font-medium text-[var(--text-muted)]
-                                 tabular-nums bg-[var(--bg-subtle)]
-                                 px-2 py-0.5 rounded-full"
-                        >
-                          {count}
-                        </span>
-                      </Tooltip>
                     </div>
                   </div>
                 </button>
@@ -382,6 +459,18 @@
   so modules and issues read as part of the same lifecycle language,
   with planned/paused added for module-specific states.
 -->
+<!-- Portfolio hero stat: big number over an uppercase label. -->
+{#snippet heroStat(value: number, label: string)}
+  <div>
+    <p class="text-[1.375rem] font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
+      {value}
+    </p>
+    <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
+      {label}
+    </p>
+  </div>
+{/snippet}
+
 {#snippet statusIcon(status: string, size: number)}
   {#if status === "active"}
     <CircleDot {size} class="text-[var(--accent)]" />

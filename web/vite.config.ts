@@ -38,6 +38,10 @@ export default defineConfig({
     // can reach the dev server running on unit-02. Without this vite only
     // listens on 127.0.0.1.
     host: true,
+    // Vite rejects Host headers it doesn't recognize (SSRF guard). Allow the
+    // tailnet MagicDNS domain so any node (unit-02, magi, ...) can be hit by
+    // its <host>.tailb93ac8.ts.net name. Leading dot = match all subdomains.
+    allowedHosts: [".tailb93ac8.ts.net"],
     // If 5173 is taken, fail fast instead of switching ports (avoids "module load failed"
     // when the browser tab still points at the old URL).
     port: 5173,

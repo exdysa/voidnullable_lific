@@ -39,7 +39,7 @@
     });
 
     if (res.ok) {
-      navigate(`/${res.data.identifier}/issues`);
+      navigate(`/${res.data.identifier}/overview`);
     } else {
       error = res.error;
       saving = false;

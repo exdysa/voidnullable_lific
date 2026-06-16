@@ -81,6 +81,11 @@
     mode = { type: "root" };
   }
 
+  // LIF-192: let the sidebar's "Jump to…" button summon the palette.
+  export function openPalette() {
+    void show();
+  }
+
   /** Esc / backspace-on-empty: submenu/prompt step back; root closes. */
   function stepBack() {
     if (mode.type === "root") {
@@ -363,7 +368,7 @@
           title: p.name,
           identifier: p.identifier,
           emoji: p.emoji,
-          route: `/${p.identifier}/issues`,
+          route: `/${p.identifier}/overview`,
           score,
         });
       }
@@ -407,7 +412,7 @@
         title: p.name,
         identifier: p.identifier,
         emoji: p.emoji,
-        route: `/${p.identifier}/issues`,
+        route: `/${p.identifier}/overview`,
         score: 1,
       }));
       selectedIdx = 0;

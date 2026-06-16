@@ -93,10 +93,11 @@
       return { type: "app", page: "project-new" };
     }
 
-    // Project-scoped: /{IDENTIFIER}/settings
-    const projectSettingsMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/settings$/i);
-    if (projectSettingsMatch) {
-      return { type: "app", page: "project-settings", project: projectSettingsMatch[1] };
+    // Project-scoped: /{IDENTIFIER}/overview (the project dashboard).
+    // `/settings` is kept as a back-compat alias for old links/bookmarks.
+    const projectOverviewMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/(overview|settings)$/i);
+    if (projectOverviewMatch) {
+      return { type: "app", page: "project-settings", project: projectOverviewMatch[1] };
     }
 
     // Project-scoped: /{IDENTIFIER}/issues
@@ -233,13 +234,16 @@
       <ProjectNew {navigate} />
     {:else if parsed.page === "project-settings"}
       <ProjectSettings {navigate} projectIdentifier={parsed.project} {onProjectChange} />
-    {:else if parsed.page === "issues"}
-      <IssueList {navigate} projectIdentifier={parsed.project} />
-    {:else if parsed.page === "board"}
+    {:else if parsed.page === "issues" || parsed.page === "board"}
+      <!-- Single IssueList instance shared across the list/board routes.
+           Rendering them as one branch keeps Svelte from unmounting +
+           remounting the component when toggling views — a remount would
+           reset state to loading and refetch issues, making the topbar
+           jump. Only the `layout` prop changes; data stays put. -->
       <IssueList
         {navigate}
         projectIdentifier={parsed.project}
-        layout="board"
+        layout={parsed.page === "board" ? "board" : "list"}
       />
     {:else if parsed.page === "issue-new"}
       <IssueNew

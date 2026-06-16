@@ -23,6 +23,7 @@
     CircleDot,
     CheckCircle2,
     Archive,
+    Pin,
   } from "lucide-svelte";
 
   // LIF-112: page lifecycle statuses. Icon + label per value, used by
@@ -322,6 +323,24 @@
          laid out horizontally since pages have no sidebar. -->
     {#if page}
       <div class="mb-6 flex flex-wrap items-center gap-4">
+        <!-- LIF-183: pin toggle. Pinned pages surface in a section atop the
+             page list regardless of folder. -->
+        {#if editable}
+          <button
+            class="flex items-center gap-1.5 text-[0.8125rem] font-medium
+                   px-2 py-1 rounded-md border transition-colors
+                   {page.pinned
+              ? 'text-[var(--accent)] border-[var(--accent)] bg-[var(--accent-subtle)]'
+              : 'text-[var(--text-muted)] border-[var(--border)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]'}"
+            title={page.pinned ? "Unpin this page" : "Pin to top of the page list"}
+            onclick={() => { if (page) saveField("pinned", !page.pinned); }}
+            disabled={saving}
+          >
+            <Pin size={13} class={page.pinned ? "fill-current" : ""} />
+            {page.pinned ? "Pinned" : "Pin"}
+          </button>
+        {/if}
+
         <!-- LIF-112: status picker. Available for every page (workspace
              pages included — status isn't project-scoped). -->
         {#if editable}

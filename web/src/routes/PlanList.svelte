@@ -12,6 +12,8 @@
   } from "../lib/api";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { ListChecks, Plus, ChevronRight } from "lucide-svelte";
+  import ProgressRing from "../lib/ProgressRing.svelte";
+  import Mascot from "../lib/Mascot.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -112,7 +114,7 @@
       <button
         class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+        onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>
@@ -127,8 +129,10 @@
     <div class="ml-auto flex items-center gap-1.5 shrink-0">
       <button
         class="flex items-center gap-1 text-[0.8125rem] font-medium
-               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
-               rounded-md hover:bg-[var(--accent-hover)] transition-colors"
+               text-[var(--btn-success-text)] bg-[var(--btn-success)]
+               px-2.5 py-1 rounded-md hover:bg-[var(--btn-success-hover)]
+               transition-colors focus:outline-none
+               motion-safe:active:scale-[0.97]"
         onclick={startCreate}
       >
         <Plus size={14} />
@@ -151,8 +155,8 @@
     {:else}
       <div class="max-w-[860px] mx-auto px-6 py-6">
         {#if creating}
-          <div class="mb-6 flex items-center gap-3 p-3 rounded-md border border-[var(--accent)] bg-[var(--accent-subtle)]">
-            <ListChecks size={16} class="text-[var(--text-muted)]" />
+          <div class="mb-6 flex items-center gap-3 p-3 rounded-xl border-l-2 border-l-[var(--btn-success)] bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+            <ListChecks size={16} class="text-[var(--btn-success)]" />
             <input
               class="flex-1 bg-transparent outline-none text-[0.875rem] text-[var(--text)]"
               placeholder="Plan title…"
@@ -164,7 +168,7 @@
               }}
             />
             <button
-              class="text-[0.8125rem] text-[var(--accent)] hover:underline disabled:opacity-50"
+              class="text-[0.8125rem] font-medium text-[var(--btn-success)] hover:underline disabled:opacity-50"
               disabled={createSaving || !createTitle.trim()}
               onclick={commitCreate}
             >
@@ -174,15 +178,25 @@
         {/if}
 
         {#if plans.length === 0 && !creating}
-          <div class="flex flex-col items-center py-20 gap-3 px-6 max-w-[480px] mx-auto text-center">
-            <ListChecks size={32} class="text-[var(--text-faint)]" />
-            <p class="text-[0.9375rem] text-[var(--text-muted)]">No plans yet</p>
-            <p class="text-[0.8125rem] text-[var(--text-faint)] leading-relaxed">
-              A plan breaks a goal into a tree of steps that survives across
-              sessions. Steps can mirror issues — closing an issue checks its step.
-            </p>
-            <button class="text-[0.8125rem] text-[var(--accent)] hover:underline mt-2" onclick={startCreate}>
-              Create the first plan
+          <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[480px] mx-auto text-center">
+            <Mascot src="/LizzyWriting.png" nativeW={567} nativeH={562} />
+            <div class="flex flex-col items-center gap-1.5">
+              <p class="text-[1.0625rem] font-medium text-[var(--text)]">The drawing board's empty</p>
+              <p class="text-[0.8125rem] text-[var(--text-muted)] leading-relaxed">
+                A plan breaks a goal into a tree of steps that survives across
+                sessions. Steps can mirror issues, so closing an issue checks
+                off its step.
+              </p>
+            </div>
+            <button
+              class="flex items-center gap-1.5 mt-1 text-[0.8125rem] font-medium
+                     text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                     px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                     transition-colors"
+              onclick={startCreate}
+            >
+              <Plus size={15} />
+              Create a plan
             </button>
           </div>
         {:else}
@@ -192,15 +206,27 @@
                 {STATUS_LABEL[group.status] ?? group.status}
                 <span class="ml-1 tabular-nums">{group.items.length}</span>
               </h2>
-              <div class="flex flex-col gap-1">
+              <div class="flex flex-col gap-2">
                 {#each group.items as plan (plan.id)}
+                  {@const frac = plan.step_count > 0 ? plan.done_count / plan.step_count : 0}
                   <button
-                    class="flex items-center gap-3 p-3 rounded-md border border-[var(--border)]
-                           hover:border-[var(--border-strong)] hover:bg-[var(--bg-subtle)]
-                           transition-colors text-left"
+                    class="group flex items-center gap-3.5 p-3 rounded-xl bg-[var(--surface)]
+                           shadow-[0_1px_2px_rgba(0,0,0,0.06)]
+                           hover:shadow-[0_6px_16px_rgba(0,0,0,0.10)]
+                           transition-all motion-safe:hover:-translate-y-0.5 text-left"
                     onclick={() => navigate(`/${projectIdentifier}/plans/${plan.id}`)}
                   >
-                    <ListChecks size={16} class="text-[var(--text-faint)] shrink-0" />
+                    <ProgressRing value={frac} size={40} stroke={4} color="var(--success)">
+                      {#snippet label()}
+                        {#if plan.step_count > 0}
+                          <span class="text-[0.625rem] font-semibold tabular-nums text-[var(--text)] leading-none">
+                            {Math.round(frac * 100)}
+                          </span>
+                        {:else}
+                          <ListChecks size={15} class="text-[var(--text-faint)]" />
+                        {/if}
+                      {/snippet}
+                    </ProgressRing>
                     <div class="flex-1 min-w-0">
                       <div class="text-[0.875rem] text-[var(--text)] truncate">{plan.title}</div>
                       <div class="text-[0.75rem] text-[var(--text-faint)] font-mono">
@@ -220,3 +246,5 @@
     {/if}
   </div>
 </div>
+
+

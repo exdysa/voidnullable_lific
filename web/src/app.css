@@ -81,6 +81,9 @@
   --error-text: #fff;
   --success: var(--color-green-600);
   --success-bg: var(--color-green-bg);
+  --btn-success: #116631;
+  --btn-success-hover: #17824a;
+  --btn-success-text: var(--color-stone-950);
   --warn: var(--color-orange-600);
 
   /* Shadow cast by the elevated chrome onto the recessed content panel.
@@ -119,6 +122,9 @@
   --error-text: var(--color-stone-950);
   --success: var(--color-green-400);
   --success-bg: var(--color-green-bg-dark);
+  --btn-success: #3bb266;
+  --btn-success-hover: #54c97e;
+  --btn-success-text: var(--color-stone-950);
   --warn: var(--color-orange-400);
 
   /* Heavier in dark mode — the same alpha that's subtle on white reads

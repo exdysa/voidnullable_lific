@@ -277,7 +277,7 @@
       <button
         class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+        onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>

@@ -27,6 +27,8 @@
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
+  import ProgressRing from "../lib/ProgressRing.svelte";
+  import Mascot from "../lib/Mascot.svelte";
   import { formatDate } from "../lib/format";
   import {
     ArrowLeft, Plus, ChevronDown,
@@ -223,6 +225,14 @@
     }
     return counts;
   });
+
+  // Module completion for the header ring. done ÷ total (total includes
+  // cancelled), matching the list-view metric.
+  let progress = $derived.by(() => {
+    const total = issues.length;
+    const done = issues.filter((i) => i.status === "done").length;
+    return { done, total, frac: total > 0 ? done / total : 0 };
+  });
 </script>
 
 <svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
@@ -267,8 +277,10 @@
         {#if editable}
           <button
             class="inline-flex items-center gap-1 text-[0.8125rem] font-medium
-                   text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
-                   rounded-md hover:bg-[var(--accent-hover)] transition-colors"
+                   text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                   px-2.5 py-1 rounded-md hover:bg-[var(--btn-success-hover)]
+                   transition-colors focus:outline-none
+                   motion-safe:active:scale-[0.97]"
             onclick={newIssueInModule}
           >
             <Plus size={13} />
@@ -370,6 +382,18 @@
                 </h1>
               {/if}
             </div>
+
+            <!-- Completion ring. The module's branding anchor: done ÷ total
+                 of its issues. Hidden for an empty module so the header
+                 doesn't show a meaningless 0%. -->
+            {#if progress.total > 0}
+              <div class="shrink-0 flex flex-col items-center gap-1 pl-2">
+                <ProgressRing value={progress.frac} size={56} stroke={5} color="var(--success)" />
+                <span class="text-[0.6875rem] text-[var(--text-muted)] tabular-nums">
+                  {progress.done}/{progress.total} done
+                </span>
+              </div>
+            {/if}
           </div>
 
           <!-- Description -->
@@ -393,7 +417,7 @@
             <!-- Section header: count rollup + new-issue affordance. The
                  rollup is the at-a-glance health for the module —
                  "what's queued, what's in progress, what's done." -->
-            <div class="flex items-baseline justify-between mb-3 pb-2 border-b border-[var(--border)]">
+            <div class="flex items-baseline justify-between mb-3 pb-2">
               <div class="flex items-baseline gap-2">
                 <h2 class="text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-muted)]">
                   Issues
@@ -415,15 +439,20 @@
             </div>
 
             {#if issues.length === 0}
-              <div class="py-10 flex flex-col items-center gap-2">
-                <p class="text-[0.875rem] text-[var(--text-faint)] italic">
-                  No issues in this module yet
+              <div class="py-10 flex flex-col items-center gap-3">
+                <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.18} />
+                <p class="text-[0.875rem] text-[var(--text-muted)]">
+                  Nothing assigned here yet
                 </p>
                 {#if editable}
                   <button
-                    class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+                    class="flex items-center gap-1.5 text-[0.8125rem] font-medium
+                           text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                           px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                           transition-colors"
                     onclick={newIssueInModule}
                   >
+                    <Plus size={14} />
                     Add the first issue
                   </button>
                 {/if}
@@ -462,8 +491,9 @@
           </section>
         </div>
 
-        <!-- Sidebar -->
-        <aside class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5">
+        <!-- Sidebar. Softly set apart by a subtle panel tint instead of a
+             hard rule (shadow/elevation language used across the app). -->
+        <aside class="w-[236px] shrink-0 self-start rounded-xl bg-[var(--bg-subtle)] py-5 px-5 my-6 mr-2">
           <!-- Status -->
           <div class="mb-5">
             <p class="text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2">

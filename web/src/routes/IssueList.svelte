@@ -15,16 +15,18 @@
     type Label,
   } from "../lib/api";
   import {
-    Plus, Search, ChevronRight, X, Layers, Signal,
+    Plus, Search, ChevronRight, ChevronDown, X, Layers, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDownUp, ArrowDown, ArrowUp, Hash, Clock, History,
-    Check, Trash2,
+    Check, Trash2, Zap, PenLine,
   } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
+  import ProjectIcon from "../lib/ProjectIcon.svelte";
+  import Mascot from "../lib/Mascot.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getContext } from "svelte";
@@ -66,6 +68,12 @@
 
   let project = $state<Project | null>(null);
   let issues = $state<Issue[]>([]);
+  // LIF-186: an unfiltered copy of the project's issues, used purely for the
+  // right sidebar's project-wide breakdowns (priority distribution, per-module
+  // counts). `issues` is server-FILTERED, so it can't answer "how many issues
+  // does each module have across the whole project" once a filter is active.
+  // When no filter is active this just mirrors `issues` (no extra fetch).
+  let allIssues = $state<Issue[]>([]);
   // LIF-161: true per-status tallies from the server. The fetched `issues`
   // array is limit-capped, so its length is NOT a reliable count — this is.
   let issueCounts = $state<IssueStatusCounts | null>(null);
@@ -112,6 +120,35 @@
     }
   }
 
+  // LIF-186: project-wide breakdowns for the right sidebar. Computed from the
+  // unfiltered `allIssues` so the distribution and per-module counts reflect
+  // the whole project, not the currently filtered view.
+  let sidebarStats = $derived.by(() => {
+    const prio: Record<string, number> = { urgent: 0, high: 0, medium: 0, low: 0, none: 0 };
+    const byModule = new Map<number, number>();
+    let noModule = 0;
+    for (const i of allIssues) {
+      prio[i.priority] = (prio[i.priority] ?? 0) + 1;
+      if (i.module_id == null) noModule++;
+      else byModule.set(i.module_id, (byModule.get(i.module_id) ?? 0) + 1);
+    }
+    return {
+      prio,
+      byModule,
+      noModule,
+      total: issueCounts?.total ?? allIssues.length,
+      active: issueCounts?.active ?? 0,
+    };
+  });
+
+  // Sidebar click-to-filter toggles (mirror the topbar status tallies).
+  function togglePriorityFilter(p: string) {
+    filterPriority = filterPriority === p ? "" : p;
+  }
+  function toggleModuleFilter(name: string) {
+    filterModule = filterModule === name ? "" : name;
+  }
+
   // ── Persisted list/board view state ──────────────────
   // Filters, search, and sort are remembered per-project so navigating
   // away (e.g. into an issue detail) and back doesn't reset the view.
@@ -132,6 +169,8 @@
     searchQuery?: string;
     sortField?: SortField;
     sortDir?: SortDir;
+    groupBy?: GroupBy;
+    density?: Density;
   };
 
   let stateHydrated = $state(false);
@@ -157,6 +196,14 @@
     searchQuery = s.searchQuery ?? "";
     if (s.sortField) sortField = s.sortField;
     if (s.sortDir) sortDir = s.sortDir;
+    if (s.groupBy) groupBy = s.groupBy;
+    if (s.density) density = s.density;
+    try {
+      const rawC = localStorage.getItem(`lific:list:collapsed:${id}`);
+      collapsedGroups = rawC ? new Set(JSON.parse(rawC) as string[]) : new Set();
+    } catch {
+      collapsedGroups = new Set();
+    }
     stateHydrated = true;
     loadProject(id);
   });
@@ -185,6 +232,8 @@
       searchQuery,
       sortField,
       sortDir,
+      groupBy,
+      density,
     };
     if (!stateHydrated) return;
     try {
@@ -262,15 +311,27 @@
 
     // Counts ride along with every issue fetch (initial load, filter
     // change, 15s poll) so the topbar tallies converge with the rows.
-    const [res, countsRes] = await Promise.all([
-      listIssues(filters),
-      getIssueCounts(project.id),
-    ]);
+    // LIF-186: when a filter is active we ALSO pull an unfiltered set for the
+    // sidebar's project-wide breakdowns; with no filter the filtered fetch is
+    // already the full set, so we skip the extra round-trip.
+    const anyFilter = !!(filterStatus || filterPriority || filterLabel || filterModule);
+    const reqs: Promise<unknown>[] = [listIssues(filters), getIssueCounts(project.id)];
+    if (anyFilter) reqs.push(listIssues({ project_id: project.id, limit: 1000 }));
+    const [res, countsRes, allRes] = (await Promise.all(reqs)) as [
+      Awaited<ReturnType<typeof listIssues>>,
+      Awaited<ReturnType<typeof getIssueCounts>>,
+      Awaited<ReturnType<typeof listIssues>> | undefined,
+    ];
     if (res.ok) {
       issues = res.data;
     }
     if (countsRes.ok) {
       issueCounts = countsRes.data;
+    }
+    if (anyFilter) {
+      if (allRes && allRes.ok) allIssues = allRes.data;
+    } else if (res.ok) {
+      allIssues = res.data;
     }
   }
 
@@ -306,8 +367,10 @@
       sortOpen ||
       hintsOpen ||
       displayOpen ||
+      newMenuOpen ||
       inlineCreateActive ||
       statusDropdownId !== null ||
+      priorityDropdownId !== null ||
       // LIF-149: a poll mustn't shuffle rows mid-selection or land stale
       // data on top of an in-flight bulk write.
       selectedIds.size > 0 ||
@@ -408,6 +471,49 @@
   let sortField = $state<SortField>("priority");
   let sortDir = $state<SortDir>("asc"); // default: urgent first
 
+  // ── LIF-191: grouping + density (Display popover) ─────
+  type GroupBy = "status" | "priority" | "module" | "none";
+  type Density = "compact" | "comfortable";
+  let groupBy = $state<GroupBy>("status");
+  let density = $state<Density>("compact");
+  // Collapsed group keys, namespaced `${groupBy}:${groupKey}` so the same
+  // header collapsed under one grouping doesn't hide a same-named one under
+  // another. Persisted per project.
+  let collapsedGroups = $state<Set<string>>(new Set());
+
+  function groupCollapseKey(key: string): string {
+    return `${groupBy}:${key}`;
+  }
+  function isGroupCollapsed(key: string): boolean {
+    return collapsedGroups.has(groupCollapseKey(key));
+  }
+  function toggleGroupCollapsed(key: string) {
+    const k = groupCollapseKey(key);
+    const next = new Set(collapsedGroups);
+    if (next.has(k)) next.delete(k);
+    else next.add(k);
+    collapsedGroups = next;
+    try {
+      localStorage.setItem(
+        `lific:list:collapsed:${projectIdentifier}`,
+        JSON.stringify([...next]),
+      );
+    } catch { /* ignore */ }
+  }
+
+  function moduleById(id: number | null): Module | undefined {
+    if (id == null) return undefined;
+    return modules.find((m) => m.id === id);
+  }
+
+  // First non-heading line of a description, for the Comfortable density
+  // preview. Cheap markdown strip, capped.
+  function descriptionPreview(content: string): string {
+    if (!content) return "";
+    const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
+    return (lines[0] ?? "").replace(/[*_`>[\]]/g, "").trim().slice(0, 160);
+  }
+
   const PRIORITY_RANK: Record<string, number> = {
     urgent: 0,
     high: 1,
@@ -469,15 +575,43 @@
     }
   }
 
-  // Group issues by status for the list view
-  let groupedByStatus = $derived.by(() => {
-    if (filterStatus) return null; // Don't group when filtered to single status
-    const groups: Record<string, Issue[]> = {};
-    for (const status of STATUSES) {
-      const matching = sortedIssues.filter((i) => i.status === status);
-      if (matching.length > 0) groups[status] = matching;
+  // LIF-191: generalized grouping for the list view. Returns ordered
+  // groups for the active `groupBy`, or null when the view should render
+  // flat (search mode, groupBy=none, or status-grouping under a single
+  // status filter — where buckets would be pointless).
+  type IssueGroup = {
+    key: string;
+    label: string;
+    kind: GroupBy;
+    module?: Module;
+    issues: Issue[];
+  };
+  let groups = $derived.by<IssueGroup[] | null>(() => {
+    if (searchQuery.trim()) return null;
+    if (groupBy === "none") return null;
+    if (groupBy === "status" && filterStatus) return null;
+
+    const out: IssueGroup[] = [];
+    if (groupBy === "status") {
+      for (const s of STATUSES) {
+        const items = sortedIssues.filter((i) => i.status === s);
+        if (items.length) out.push({ key: s, label: s, kind: "status", issues: items });
+      }
+    } else if (groupBy === "priority") {
+      for (const p of PRIORITIES) {
+        const items = sortedIssues.filter((i) => i.priority === p);
+        if (items.length) out.push({ key: p, label: p, kind: "priority", issues: items });
+      }
+    } else if (groupBy === "module") {
+      for (const m of modules) {
+        const items = sortedIssues.filter((i) => i.module_id === m.id);
+        if (items.length)
+          out.push({ key: String(m.id), label: m.name, kind: "module", module: m, issues: items });
+      }
+      const none = sortedIssues.filter((i) => i.module_id == null);
+      if (none.length) out.push({ key: "none", label: "No module", kind: "module", issues: none });
     }
-    return groups;
+    return out;
   });
 
   function hasActiveFilters(): boolean {
@@ -526,6 +660,8 @@
   let displayOpen = $state(false);
   // Sort popover (field + direction).
   let sortOpen = $state(false);
+  // Split "New" button caret menu (quick create / full editor / status presets).
+  let newMenuOpen = $state(false);
 
   // ── Board view: per-status column visibility ─────────
   // Users can hide columns they don't care about in their workflow
@@ -643,8 +779,9 @@
   let inlineCreateTitleEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
 
-  // Status dropdown on existing issue rows
+  // Status / priority dropdowns on existing issue rows
   let statusDropdownId = $state<number | null>(null);
+  let priorityDropdownId = $state<number | null>(null);
 
   // ── LIF-149: multi-select + bulk actions ─────────────
   // Selection is ephemeral (never persisted): `x` toggles the focused
@@ -793,13 +930,15 @@
     return true;
   }
 
-  // Flat ordered list for keyboard indexing (matches render order)
+  // Flat ordered list for keyboard indexing (matches render order).
+  // Collapsed groups contribute no rows, so they're excluded — keyboard
+  // nav and selection indices stay aligned with what's on screen.
   let flatIssues = $derived.by(() => {
-    if (groupedByStatus && !filterStatus) {
+    if (groups) {
       const flat: Issue[] = [];
-      for (const status of STATUSES) {
-        const group = groupedByStatus[status];
-        if (group) flat.push(...group);
+      for (const g of groups) {
+        if (isGroupCollapsed(g.key)) continue;
+        flat.push(...g.issues);
       }
       return flat;
     }
@@ -1000,8 +1139,29 @@
           });
         }
         break;
+      case "p":
+        // LIF-191: cycle priority on the focused row (mirrors `s` for status).
+        if (focusedIndex >= 0 && focusedIndex < flatIssues.length && canFireKey()) {
+          e.preventDefault();
+          const pIssue = flatIssues[focusedIndex];
+          const pId = pIssue.id;
+          const pIdx = PRIORITIES.indexOf(pIssue.priority);
+          const nextP = PRIORITIES[(pIdx + 1) % PRIORITIES.length];
+          skipFocusReset = true;
+          trackMutation(updateIssue(pIssue.id, { priority: nextP })).then((res) => {
+            if (res.ok) {
+              pIssue.priority = nextP;
+              issues = [...issues];
+              const newIdx = flatIssues.findIndex((i) => i.id === pId);
+              if (newIdx >= 0) { scrollOnFocus = true; focusedIndex = newIdx; }
+            }
+          });
+        }
+        break;
       case "Escape":
-        if (hintsOpen) {
+        if (newMenuOpen) {
+          newMenuOpen = false;
+        } else if (hintsOpen) {
           hintsOpen = false;
         } else if (displayOpen) {
           displayOpen = false;
@@ -1009,6 +1169,8 @@
           sortOpen = false;
         } else if (bulkMenu !== null) {
           bulkMenu = null;
+        } else if (priorityDropdownId !== null) {
+          priorityDropdownId = null;
         } else if (statusDropdownId !== null) {
           statusDropdownId = null;
         } else if (selectedIds.size > 0) {
@@ -1022,6 +1184,16 @@
         }
         break;
     }
+  }
+
+  // Empty-state CTA: open the inline quick-create row (mirrors the `c`
+  // shortcut) and drop focus straight into the title input.
+  function startInlineCreateFromEmpty() {
+    inlineCreateActive = true;
+    inlineCreateStatus = "backlog";
+    inlineCreateStatusOpen = false;
+    inlineCreateTitle = "";
+    requestAnimationFrame(() => inlineCreateTitleEl?.focus());
   }
 
   async function submitInlineCreate() {
@@ -1047,10 +1219,12 @@
   onmousemove={handleMouseMove}
   onclick={() => {
     statusDropdownId = null;
+    priorityDropdownId = null;
     inlineCreateStatusOpen = false;
     hintsOpen = false;
     displayOpen = false;
     sortOpen = false;
+    newMenuOpen = false;
     bulkMenu = null;
   }}
 />
@@ -1068,7 +1242,7 @@
         <button
           class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
                  hover:text-[var(--text)] transition-colors"
-          onclick={() => navigate(`/${projectIdentifier}/settings`)}
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
         >
           {projectIdentifier}
         </button>
@@ -1076,19 +1250,50 @@
         <span class="text-[0.8125rem] font-medium text-[var(--text)]">
           {layout === "board" ? "Board" : "Issues"}
         </span>
-        {#if countLabel}
-          <span
-            class="ml-1 text-[0.6875rem] text-[var(--text-faint)] font-medium
-                   tabular-nums"
-          >
-            {countLabel}
-          </span>
-        {/if}
+      </div>
+
+      <!-- View switcher pill. Anchored directly after the breadcrumb so the
+           toggle never shifts when the per-status tallies (which arrive a
+           frame later, after the counts fetch) render in beside it. Routes
+           to `/{project}/issues` for list mode, `/{project}/board` for
+           board mode; active state derives from the `layout` prop. -->
+      <div
+        class="flex items-center gap-0.5 p-0.5 rounded-md bg-[var(--bg)]
+               shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
+      >
+        <button
+          class="flex items-center gap-1 px-2 py-0.5 rounded
+                 text-[0.75rem] font-medium transition-all
+                 {layout === 'list'
+            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          aria-pressed={layout === "list"}
+          onclick={() => navigate(`/${projectIdentifier}/issues`)}
+        >
+          <ListIcon size={11} class="shrink-0" />
+          List
+        </button>
+        <button
+          class="flex items-center gap-1 px-2 py-0.5 rounded
+                 text-[0.75rem] font-medium transition-all
+                 {layout === 'board'
+            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          aria-pressed={layout === "board"}
+          onclick={() => navigate(`/${projectIdentifier}/board`)}
+        >
+          <LayoutGrid size={11} class="shrink-0" />
+          Board
+        </button>
       </div>
 
       <!-- LIF-161: per-status tallies (server truth, immune to the list
-           fetch cap). Clicking one toggles the matching status filter. -->
-      {#if statusCounts.length > 0}
+           fetch cap). Clicking one toggles the matching status filter.
+           Gated on at least one non-zero tally — statusCounts is always
+           length 5 once counts load, so checking length alone would render
+           an empty flex container (and its gap-3) for a project with no
+           issues in any status. -->
+      {#if statusCounts.some((s) => s.count > 0)}
         <div class="flex items-center gap-0.5">
           {#each statusCounts as { status, count } (status)}
             {#if count > 0}
@@ -1114,39 +1319,6 @@
           {/each}
         </div>
       {/if}
-
-      <!-- View switcher pill. Routes to `/{project}/issues` for list mode,
-           `/{project}/board` for board mode. Active state derives from the
-           `layout` prop, which is set by App's route parser. -->
-      <div
-        class="flex items-center gap-0.5 p-0.5 rounded-md
-               bg-[var(--bg-subtle)] border border-[var(--border)]"
-      >
-        <button
-          class="flex items-center gap-1 px-2 py-0.5 rounded
-                 text-[0.75rem] font-medium transition-colors
-                 {layout === 'list'
-            ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-          aria-pressed={layout === "list"}
-          onclick={() => navigate(`/${projectIdentifier}/issues`)}
-        >
-          <ListIcon size={11} class="shrink-0" />
-          List
-        </button>
-        <button
-          class="flex items-center gap-1 px-2 py-0.5 rounded
-                 text-[0.75rem] font-medium transition-colors
-                 {layout === 'board'
-            ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-          aria-pressed={layout === "board"}
-          onclick={() => navigate(`/${projectIdentifier}/board`)}
-        >
-          <LayoutGrid size={11} class="shrink-0" />
-          Board
-        </button>
-      </div>
     </div>
 
     <!-- Separator -->
@@ -1271,6 +1443,18 @@
     <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
     <div class="ml-auto flex items-center gap-0.5 shrink-0">
 
+      <!-- Issue count. Sits at the head of the right cluster. Always
+           rendered (never gated on a value) with a reserved min-width so
+           the brief load frame — where countLabel is "" until counts
+           arrive — can't collapse the element and reflow the toolbar. -->
+      <span
+        class="mr-1.5 min-w-[2ch] text-right text-[0.6875rem] tabular-nums
+               font-medium text-[var(--text-faint)]"
+      >
+        {countLabel}
+      </span>
+      <div class="w-px h-4 bg-[var(--border)] mr-1"></div>
+
       <!-- Sort button + popover. Shows current field + direction; clicking
            a row selects it (default asc) or, if already active, toggles
            direction. Mirrors the spreadsheet-column sort pattern users
@@ -1362,12 +1546,9 @@
         {/if}
       </div>
 
-      <!-- Display options button — HIDDEN for v1.4 (LIF-104).
-           The popover only ever held a "coming soon" placeholder, which read
-           as a broken control to users. Grouping/density is now tracked as a
-           feature; drop this {#if false} to re-enable the button when it ships.
-           Kept (not deleted) so the scaffolding is here for that work. -->
-      {#if false}
+      <!-- LIF-191: Display options — group-by + density. List view only;
+           the board has its own column controls. -->
+      {#if layout !== "board"}
       <div class="relative">
         <Tooltip content={displayOpen ? null : "Display options"} placement="bottom">
           <button
@@ -1375,7 +1556,7 @@
                    text-[var(--text-muted)] hover:text-[var(--text)]
                    hover:bg-[var(--bg-subtle)] transition-colors
                    {displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
-            onclick={(e) => { e.stopPropagation(); displayOpen = !displayOpen; sortOpen = false; hintsOpen = false; }}
+            onclick={(e) => { e.stopPropagation(); displayOpen = !displayOpen; sortOpen = false; hintsOpen = false; newMenuOpen = false; }}
           >
             <SlidersHorizontal size={14} />
           </button>
@@ -1383,18 +1564,42 @@
         {#if displayOpen}
           <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
           <div
-            class="absolute right-0 top-full mt-1.5 z-30 w-[240px]
+            class="absolute right-0 top-full mt-1.5 z-30 w-[224px]
                    bg-[var(--surface)] border border-[var(--border)]
-                   rounded-lg shadow-lg p-3 text-[0.8125rem]"
+                   rounded-lg shadow-lg py-1.5 text-[0.8125rem]"
             onclick={(e) => e.stopPropagation()}
           >
-            <div class="text-[var(--text-faint)] text-[0.6875rem]
-                        uppercase tracking-widest font-semibold mb-2">
-              Display
+            <div class="px-3 pt-1 pb-1.5 text-[var(--text-faint)] text-[0.6875rem] uppercase tracking-widest font-semibold">
+              Group by
             </div>
-            <div class="text-[var(--text-muted)]">
-              Grouping &amp; density land here next pass.
+            {#each [["status", "Status"], ["priority", "Priority"], ["module", "Module"], ["none", "None"]] as [val, label]}
+              <button
+                class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
+                       {groupBy === val
+                  ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                onclick={() => { groupBy = val as GroupBy; }}
+              >
+                {label}
+                {#if groupBy === val}<Check size={13} class="text-[var(--accent)]" />{/if}
+              </button>
+            {/each}
+
+            <div class="px-3 pt-2.5 pb-1.5 mt-1 text-[var(--text-faint)] text-[0.6875rem] uppercase tracking-widest font-semibold border-t border-[var(--border)]">
+              Density
             </div>
+            {#each [["compact", "Compact"], ["comfortable", "Comfortable"]] as [val, label]}
+              <button
+                class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
+                       {density === val
+                  ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                onclick={() => { density = val as Density; }}
+              >
+                {label}
+                {#if density === val}<Check size={13} class="text-[var(--accent)]" />{/if}
+              </button>
+            {/each}
           </div>
         {/if}
       </div>
@@ -1471,6 +1676,7 @@
               {#each [
                 ["C", "New issue"],
                 ["S", "Cycle status"],
+                ["P", "Cycle priority"],
                 ["↑ ↓ / J K", "Navigate"],
                 ["X", "Select"],
                 ["⇧ J K", "Extend selection"],
@@ -1499,20 +1705,147 @@
       <!-- Separator -->
       <div class="w-px h-4 bg-[var(--border)] mx-1.5"></div>
 
-      <!-- Primary action: New issue. -->
-      <button
-        class="flex items-center gap-1 text-[0.8125rem] font-medium
-               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
-               rounded-md hover:bg-[var(--accent-hover)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
-      >
-        <Plus size={14} />
-        New
-      </button>
+      <!-- Primary action: New issue. Split button — the main segment opens
+           the inline quick-create row (same green + behavior as the
+           empty-state CTA, for consistency); the caret reveals alternative
+           create paths. Renovated: (1) green to match the empty-state CTA,
+           (2) quick-create behavior parity, (3) split caret menu,
+           (4) inline `C` shortcut hint, (5) motion + focus-visible polish. -->
+      <div class="relative">
+        <div
+          class="flex items-stretch h-7 rounded-md overflow-hidden shadow-sm
+                 focus-within:ring-2 focus-within:ring-[var(--btn-success)]
+                 focus-within:ring-offset-1
+                 focus-within:ring-offset-[var(--chrome)]"
+        >
+          <!-- Main segment: quick-create -->
+          <button
+            class="group flex items-center gap-1.5 pl-2.5 pr-2
+                   text-[0.8125rem] font-medium text-[var(--btn-success-text)]
+                   bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
+                   transition-colors focus:outline-none
+                   motion-safe:active:scale-[0.97]"
+            onclick={(e) => {
+              e.stopPropagation();
+              newMenuOpen = false;
+              startInlineCreateFromEmpty();
+            }}
+          >
+            <Plus
+              size={14}
+              class="motion-safe:transition-transform
+                     motion-safe:group-hover:rotate-90"
+            />
+            New
+            <kbd
+              class="ml-0.5 grid place-items-center min-w-[1.05rem] h-[1.05rem]
+                     rounded bg-white/20 font-mono text-[0.625rem] leading-none"
+            >
+              C
+            </kbd>
+          </button>
+          <div class="w-px bg-white/25"></div>
+          <!-- Caret segment: alternative create paths -->
+          <button
+            class="flex items-center justify-center px-1.5
+                   text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                   hover:bg-[var(--btn-success-hover)] transition-colors
+                   focus:outline-none motion-safe:active:scale-[0.97]"
+            aria-label="More create options"
+            aria-haspopup="menu"
+            aria-expanded={newMenuOpen}
+            onclick={(e) => {
+              e.stopPropagation();
+              newMenuOpen = !newMenuOpen;
+              sortOpen = false;
+              displayOpen = false;
+              hintsOpen = false;
+            }}
+          >
+            <ChevronDown
+              size={14}
+              class="motion-safe:transition-transform {newMenuOpen
+                ? 'rotate-180'
+                : ''}"
+            />
+          </button>
+        </div>
+
+        {#if newMenuOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <div
+            role="menu"
+            tabindex="-1"
+            class="absolute right-0 top-full mt-1.5 z-30 w-[208px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-lg shadow-lg py-1.5"
+            onclick={(e) => e.stopPropagation()}
+          >
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={() => {
+                newMenuOpen = false;
+                startInlineCreateFromEmpty();
+              }}
+            >
+              <Zap size={14} class="text-[var(--success)]" />
+              <span class="flex-1">Quick create</span>
+              <kbd
+                class="px-1.5 py-0.5 rounded border border-[var(--border)]
+                       bg-[var(--bg-subtle)] text-[var(--text)] font-mono
+                       text-[0.6875rem] leading-none shrink-0"
+              >
+                C
+              </kbd>
+            </button>
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                     text-[0.8125rem] text-[var(--text)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={() => {
+                newMenuOpen = false;
+                navigate(`/${projectIdentifier}/issues/new`);
+              }}
+            >
+              <PenLine size={14} class="text-[var(--text-muted)]" />
+              <span class="flex-1">Open full editor</span>
+            </button>
+
+            <div class="my-1 h-px bg-[var(--border)]"></div>
+            <div
+              class="px-3 pb-1 pt-0.5 text-[0.625rem] uppercase tracking-widest
+                     font-semibold text-[var(--text-faint)]"
+            >
+              New in status
+            </div>
+            {#each ["backlog", "todo", "active"] as s}
+              <button
+                role="menuitem"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+                       text-[0.8125rem] capitalize text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors"
+                onclick={() => {
+                  newMenuOpen = false;
+                  navigate(`/${projectIdentifier}/issues/new?status=${s}`);
+                }}
+              >
+                <StatusIcon status={s} size={14} />
+                <span class="flex-1">{s}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 {/snippet}
 
+<div class="h-full flex">
+ <div class="flex-1 min-w-0">
 {#if layout === "board"}
   <!-- ── BOARD LAYOUT ──────────────────────────────────────────
        Horizontally-scrolling kanban. Columns are statuses (filterable
@@ -1624,6 +1957,22 @@
                  treats every direct child of a dndzone as an item, so
                  non-item children would break drag accounting). -->
             <div class="flex-1 overflow-y-auto p-2 min-h-0 flex flex-col">
+              {#if colIssues.length === 0}
+                <!-- Visual-only empty placeholder, pinned to the top of the
+                     column. pointer-events-none so it never intercepts drop
+                     hits on the zone below. Kept as a sibling of the dndzone
+                     (svelte-dnd-action treats every direct child of a zone
+                     as an item). -->
+                <div
+                  class="pointer-events-none flex flex-col items-center
+                         gap-1.5 pt-4 pb-2"
+                >
+                  <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.1} />
+                  <span class="text-[0.75rem] text-[var(--text-faint)]">
+                    All quiet
+                  </span>
+                </div>
+              {/if}
               <!-- Drop zone. All zones share `type: "lific-issues"` so an
                    item dragged from any column drops into any other. -->
               <div
@@ -1720,16 +2069,6 @@
                 </article>
               {/each}
               </div>
-              {#if colIssues.length === 0}
-                <!-- Visual-only empty placeholder. pointer-events-none so
-                     it never intercepts drop hits on the zone above. -->
-                <div
-                  class="pointer-events-none text-center py-6
-                         text-[0.75rem] text-[var(--text-faint)]"
-                >
-                  No issues
-                </div>
-              {/if}
             </div>
           </div>
         {/if}
@@ -1843,11 +2182,14 @@
         <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
       </div>
     {:else if filteredIssues.length === 0}
-      <div class="flex flex-col items-center justify-center py-20 gap-2">
-        <p class="text-[var(--text-muted)] text-[0.9375rem]">
-          {hasActiveFilters() || searchQuery ? "No issues match your filters" : "No issues yet"}
-        </p>
-        {#if hasActiveFilters() || searchQuery}
+      {#if hasActiveFilters() || searchQuery}
+        <!-- Filtered-empty: work exists, it's just hidden behind a
+             filter/search, so we keep the recovery affordance. -->
+        <div class="flex flex-col items-center justify-center py-20 gap-3">
+          <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.16} />
+          <p class="text-[var(--text-muted)] text-[0.9375rem]">
+            No issues match your filters
+          </p>
           <button
             class="text-[0.8125rem] text-[var(--accent)]
                    hover:underline transition-colors"
@@ -1855,8 +2197,32 @@
           >
             Clear filters
           </button>
-        {/if}
-      </div>
+        </div>
+      {:else if !inlineCreateActive}
+        <!-- Truly-empty: nothing to do. Hidden while the inline create
+             row is open so the mascot doesn't fight the input. -->
+        <div class="flex flex-col items-center justify-center py-20 gap-4">
+          <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.25} />
+          <div class="flex flex-col items-center gap-1.5 text-center">
+            <p class="text-[var(--text)] text-[1.0625rem] font-medium">
+              All quiet here
+            </p>
+            <p class="text-[var(--text-muted)] text-[0.875rem]">
+              No work on the board. Time for a nap… or a fresh idea.
+            </p>
+          </div>
+          <button
+            class="flex items-center gap-1.5 mt-1 text-[0.8125rem] font-medium
+                   text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                   px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                   transition-colors"
+            onclick={startInlineCreateFromEmpty}
+          >
+            <Plus size={15} />
+            Create an issue
+          </button>
+        </div>
+      {/if}
     {:else if searchQuery.trim()}
       <!-- LIF-119: search-mode flat ranked list. Bypasses grouping —
            when hunting for an issue by name or content, the status
@@ -1870,32 +2236,45 @@
       {#each sortedIssues as issue, i (issue.id)}
         {@render issueRow(issue, i)}
       {/each}
-    {:else if groupedByStatus && !filterStatus}
-      <!-- Grouped view -->
-      {@const _groups = Object.entries(groupedByStatus)}
-      {#each _groups as [status, statusIssues], _gi (status)}
-        {@const groupOffset = _groups.slice(0, _gi).reduce((n, [, g]) => n + g.length, 0)}
+    {:else if groups}
+      <!-- LIF-191: grouped view (group-by status / priority / module).
+           Offsets only count NON-collapsed preceding groups so keyboard
+           focus indices line up with flatIssues. -->
+      {#each groups as g, _gi (g.key)}
+        {@const collapsed = isGroupCollapsed(g.key)}
+        {@const groupOffset = groups.slice(0, _gi).reduce((n, gg) => n + (isGroupCollapsed(gg.key) ? 0 : gg.issues.length), 0)}
         <div class="border-b border-[var(--border)] last:border-b-0">
-          <div
-            class="sticky top-0 z-10 flex items-center gap-2 px-6 py-2
-                   bg-[var(--surface)] border-b border-[var(--border)]"
+          <button
+            class="w-full sticky top-0 z-10 flex items-center gap-2 px-6 py-2
+                   bg-[var(--surface)] border-b border-[var(--border)]
+                   hover:bg-[var(--bg-subtle)] transition-colors text-left"
+            onclick={() => toggleGroupCollapsed(g.key)}
           >
-            <span class="inline-flex items-center gap-1.5">
-              <StatusIcon status={status} size={14} />
-              <span
-                class="text-[0.75rem] font-semibold uppercase tracking-widest
-                       text-[var(--text-muted)]"
-              >
-                {status}
-              </span>
+            <ChevronRight
+              size={13}
+              class="shrink-0 text-[var(--text-faint)] transition-transform {collapsed ? '' : 'rotate-90'}"
+            />
+            {#if g.kind === "status"}
+              <StatusIcon status={g.key} size={14} />
+            {:else if g.kind === "priority"}
+              <PriorityIcon priority={g.key} size={14} />
+            {:else if g.kind === "module"}
+              {#if g.module?.emoji}
+                <ProjectIcon value={g.module.emoji} size={14} class="text-[var(--text-muted)]" />
+              {:else}
+                <Layers size={14} class="text-[var(--text-faint)]" />
+              {/if}
+            {/if}
+            <span class="text-[0.75rem] font-semibold uppercase tracking-widest text-[var(--text-muted)] truncate">
+              {g.label}
             </span>
-            <span class="text-[0.75rem] text-[var(--text-faint)]">
-              {statusIssues.length}
-            </span>
-          </div>
-          {#each statusIssues as issue, si (issue.id)}
-            {@render issueRow(issue, groupOffset + si)}
-          {/each}
+            <span class="text-[0.75rem] text-[var(--text-faint)] tabular-nums">{g.issues.length}</span>
+          </button>
+          {#if !collapsed}
+            {#each g.issues as issue, si (issue.id)}
+              {@render issueRow(issue, groupOffset + si)}
+            {/each}
+          {/if}
         </div>
       {/each}
     {:else}
@@ -2125,13 +2504,104 @@
   {/if}
 </div>
 {/if}
+ </div>
+
+ <!-- LIF-186: persistent right sidebar — project-wide issue context.
+      Always-on (no toggle) on lg+; mirrors the Pages sidebar. Breakdowns
+      come from the unfiltered `allIssues`, and every row is a one-click
+      filter shortcut into the existing filter state. -->
+ {#if layout !== "board" && !loading && !error}
+   <aside
+     class="hidden lg:flex flex-col w-[244px] shrink-0 overflow-y-auto
+            border-l border-[var(--border)] bg-[var(--bg-subtle)] px-4 py-5"
+   >
+     <!-- Summary -->
+     <div class="grid grid-cols-2 gap-3 mb-5">
+       <div>
+         <p class="text-[1.375rem] font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
+           {sidebarStats.total}
+         </p>
+         <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
+           Issues
+         </p>
+       </div>
+       <div>
+         <p class="text-[1.375rem] font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
+           {sidebarStats.active}
+         </p>
+         <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
+           Active
+         </p>
+       </div>
+     </div>
+
+     <!-- Priority breakdown — not surfaced anywhere else in the view; each
+          row toggles the Priority filter. -->
+     <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2 px-1">
+       Priority
+     </p>
+     <div class="flex flex-col gap-0.5 mb-5">
+       {#each PRIORITIES as p}
+         {#if sidebarStats.prio[p] > 0}
+           <button
+             class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[0.8125rem]
+                    transition-colors
+                    {filterPriority === p
+               ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
+               : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
+             onclick={() => togglePriorityFilter(p)}
+           >
+             <PriorityIcon priority={p} size={14} />
+             <span class="flex-1 capitalize">{p}</span>
+             <span class="tabular-nums text-[0.6875rem] text-[var(--text-faint)]">
+               {sidebarStats.prio[p]}
+             </span>
+           </button>
+         {/if}
+       {/each}
+     </div>
+
+     {#if modules.length > 0}
+       <div class="h-px bg-[var(--border)] -mx-4 mb-4"></div>
+       <!-- Module navigator — parallel to the Pages folder navigator;
+            click to focus a module's issues. -->
+       <p class="text-[0.625rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2 px-1">
+         Modules
+       </p>
+       <div class="flex flex-col gap-0.5">
+         {#each modules as m (m.id)}
+           <button
+             class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-[0.8125rem]
+                    transition-colors
+                    {filterModule === m.name
+               ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
+               : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
+             onclick={() => toggleModuleFilter(m.name)}
+           >
+             {#if m.emoji}
+               <span class="shrink-0 text-[var(--text-faint)]"><ProjectIcon value={m.emoji} size={14} /></span>
+             {:else}
+               <Layers size={14} class="shrink-0 text-[var(--text-faint)]" />
+             {/if}
+             <span class="flex-1 truncate">{m.name}</span>
+             <span class="tabular-nums text-[0.6875rem] text-[var(--text-faint)]">
+               {sidebarStats.byModule.get(m.id) ?? 0}
+             </span>
+           </button>
+         {/each}
+       </div>
+     {/if}
+   </aside>
+ {/if}
+</div>
 
 {#snippet issueRow(issue: Issue, idx: number)}
   {@const isFocused = idx === focusedIndex}
   {@const isSelected = selectedIds.has(issue.id)}
   {@const hitSnippet = issueSearchScores.get(issue.id)?.snippet ?? null}
   <div
-    class="w-full flex items-center gap-3 px-6 py-2.5 text-left
+    class="w-full flex items-center gap-3 px-6 text-left
+           {density === 'comfortable' ? 'py-3' : 'py-2.5'}
            border-b border-[var(--border)] last:border-b-0
            border-l-2 transition-colors group cursor-pointer
            {isFocused ? 'border-l-[var(--accent)]' : 'border-l-transparent'}
@@ -2274,6 +2744,11 @@
         <span class="text-[0.75rem] text-[var(--text-muted)] truncate">
           {hitSnippet}
         </span>
+      {:else if density === "comfortable"}
+        {@const prev = descriptionPreview(issue.description)}
+        {#if prev}
+          <span class="text-[0.75rem] text-[var(--text-faint)] truncate">{prev}</span>
+        {/if}
       {/if}
     </div>
 
@@ -2298,17 +2773,80 @@
       </div>
     {/if}
 
-    <!-- Priority icon. Matches the icon used in the filter dropdown so the
-         row and the filter chip vocabulary stay consistent. -->
-    <span class="shrink-0 w-9 flex items-center justify-end">
-      {#if issue.priority !== "none"}
-        <Tooltip
-          content={issue.priority[0].toUpperCase() + issue.priority.slice(1)}
-        >
-          <PriorityIcon priority={issue.priority} size={21} />
-        </Tooltip>
+    <!-- LIF-191: module chip — which arc this issue belongs to. Hidden when
+         already grouped by module (redundant). -->
+    {#if issue.module_id != null && groupBy !== "module"}
+      {@const mod = moduleById(issue.module_id)}
+      {#if mod}
+        <span class="shrink-0 inline-flex items-center gap-1 max-w-[130px] text-[0.6875rem] text-[var(--text-muted)]">
+          {#if mod.emoji}
+            <ProjectIcon value={mod.emoji} size={12} />
+          {:else}
+            <Layers size={11} class="text-[var(--text-faint)]" />
+          {/if}
+          <span class="truncate">{mod.name}</span>
+        </span>
       {/if}
-    </span>
+    {/if}
+
+    <!-- LIF-191: priority — click to pick in place (mirrors the status
+         picker). When 'none', a faint affordance appears on row hover. -->
+    <div class="relative shrink-0 w-9 flex items-center justify-end">
+      <Tooltip
+        content={priorityDropdownId === issue.id
+          ? null
+          : issue.priority === "none"
+            ? "Set priority"
+            : issue.priority[0].toUpperCase() + issue.priority.slice(1)}
+      >
+        <button
+          class="size-6 flex items-center justify-end transition-opacity hover:opacity-100
+                 {issue.priority === 'none' ? 'opacity-0 group-hover:opacity-100' : ''}"
+          onclick={(e) => {
+            e.stopPropagation();
+            statusDropdownId = null;
+            priorityDropdownId = priorityDropdownId === issue.id ? null : issue.id;
+          }}
+        >
+          {#if issue.priority !== "none"}
+            <PriorityIcon priority={issue.priority} size={21} />
+          {:else}
+            <Signal size={15} class="text-[var(--text-faint)]" />
+          {/if}
+        </button>
+      </Tooltip>
+      {#if priorityDropdownId === issue.id}
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div
+          class="absolute right-0 top-full mt-1.5 z-30 w-[150px]
+                 bg-[var(--surface)] border border-[var(--border)]
+                 rounded-lg shadow-lg py-1.5"
+          onclick={(e) => e.stopPropagation()}
+        >
+          {#each PRIORITIES as p}
+            <button
+              class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                     text-[0.8125rem] capitalize transition-colors
+                     {p === issue.priority
+                ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
+                : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+              onclick={() => {
+                priorityDropdownId = null;
+                if (p !== issue.priority) {
+                  skipFocusReset = true;
+                  updateIssue(issue.id, { priority: p }).then((res) => {
+                    if (res.ok) { issue.priority = p; issues = [...issues]; }
+                  });
+                }
+              }}
+            >
+              <span class="w-4 flex justify-center"><PriorityIcon priority={p} size={15} /></span>
+              {p}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     <!-- Updated time -->
     <span class="text-[0.75rem] text-[var(--text-faint)] shrink-0 w-[60px] text-right">
