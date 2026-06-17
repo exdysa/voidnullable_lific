@@ -40,6 +40,14 @@
     type SortDir,
   } from "../lib/issues/sort";
   import { computeSearchResult, RESULT_CAP } from "../lib/issues/search";
+  import {
+    STATUSES,
+    PRIORITIES,
+    buildGroups,
+    descriptionPreview,
+    type GroupBy,
+    type Density,
+  } from "../lib/issues/grouping";
 
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
@@ -87,8 +95,6 @@
   let filterModule = $state<string>("");
   let searchQuery = $state("");
 
-  const STATUSES = ["backlog", "todo", "active", "done", "cancelled"];
-  const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
 
   let statusOptions = $derived([
     { value: "", label: "Status" },
@@ -412,8 +418,8 @@
   let sortDir = $state<SortDir>("asc"); // default: urgent first
 
   // ── LIF-191: grouping + density (Display popover) ─────
-  type GroupBy = "status" | "priority" | "module" | "none";
-  type Density = "compact" | "comfortable";
+  // Types + the group builder live in lib/issues/grouping.ts; the component
+  // owns only the reactive groupBy/density/collapsed state.
   let groupBy = $state<GroupBy>("status");
   let density = $state<Density>("compact");
   // Collapsed group keys, namespaced `${groupBy}:${groupKey}` so the same
@@ -446,14 +452,6 @@
     return modules.find((m) => m.id === id);
   }
 
-  // First non-heading line of a description, for the Comfortable density
-  // preview. Cheap markdown strip, capped.
-  function descriptionPreview(content: string): string {
-    if (!content) return "";
-    const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-    return (lines[0] ?? "").replace(/[*_`>[\]]/g, "").trim().slice(0, 160);
-  }
-
   // Sort applied to filtered issues. We make a fresh array so we don't
   // mutate the underlying `issues` state in place. The comparator is the
   // pure compareIssues from lib/issues/sort.ts, fed the current search
@@ -481,44 +479,12 @@
     }
   }
 
-  // LIF-191: generalized grouping for the list view. Returns ordered
-  // groups for the active `groupBy`, or null when the view should render
-  // flat (search mode, groupBy=none, or status-grouping under a single
-  // status filter — where buckets would be pointless).
-  type IssueGroup = {
-    key: string;
-    label: string;
-    kind: GroupBy;
-    module?: Module;
-    issues: Issue[];
-  };
-  let groups = $derived.by<IssueGroup[] | null>(() => {
-    if (searchQuery.trim()) return null;
-    if (groupBy === "none") return null;
-    if (groupBy === "status" && filterStatus) return null;
-
-    const out: IssueGroup[] = [];
-    if (groupBy === "status") {
-      for (const s of STATUSES) {
-        const items = sortedIssues.filter((i) => i.status === s);
-        if (items.length) out.push({ key: s, label: s, kind: "status", issues: items });
-      }
-    } else if (groupBy === "priority") {
-      for (const p of PRIORITIES) {
-        const items = sortedIssues.filter((i) => i.priority === p);
-        if (items.length) out.push({ key: p, label: p, kind: "priority", issues: items });
-      }
-    } else if (groupBy === "module") {
-      for (const m of modules) {
-        const items = sortedIssues.filter((i) => i.module_id === m.id);
-        if (items.length)
-          out.push({ key: String(m.id), label: m.name, kind: "module", module: m, issues: items });
-      }
-      const none = sortedIssues.filter((i) => i.module_id == null);
-      if (none.length) out.push({ key: "none", label: "No module", kind: "module", issues: none });
-    }
-    return out;
-  });
+  // LIF-191: generalized grouping for the list view (logic in
+  // lib/issues/grouping.ts). Returns ordered groups for the active
+  // `groupBy`, or null when the view should render flat.
+  let groups = $derived(
+    buildGroups({ sortedIssues, modules, groupBy, searchQuery, filterStatus }),
+  );
 
   function hasActiveFilters(): boolean {
     return !!(filterStatus || filterPriority || filterLabel || filterModule);
