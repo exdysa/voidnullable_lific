@@ -726,13 +726,22 @@ export interface OsPaths {
   windows: string;
 }
 
+/** A single instruction. `text` renders as prose; `command`, when present,
+ *  renders as a bounded, copyable code chip so the runnable bit is visually
+ *  distinct from the surrounding words (instead of one gray prose blob). */
+export interface NoteStep {
+  text?: string;
+  command?: string;
+}
+
 export interface ToolTemplate {
   id: string;
   name: string;
   description: string;
   /** Config-file location per OS. Content (generateConfig) is OS-identical. */
   configPath: OsPaths;
-  configNote?: string;
+  /** Structured setup steps shown above the config block. */
+  configNote?: NoteStep[];
   generateConfig: (url: string, key: string) => string;
   /** True when the tool reads the key from an env var rather than embedding
    *  it in the config block — the modal then surfaces the key + export line
@@ -758,7 +767,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
       "~/.config/opencode/opencode.json",
       "%USERPROFILE%\\.config\\opencode\\opencode.json"
     ),
-    configNote: 'Add to the "mcp" section of your config.',
+    configNote: [{ text: 'Add this to the "mcp" section of your config.' }],
     generateConfig: (_url, key) =>
       JSON.stringify(
         {
@@ -780,7 +789,9 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
       "~/.cursor/mcp.json (global) · .cursor/mcp.json (project)",
       "%USERPROFILE%\\.cursor\\mcp.json (global) · .cursor\\mcp.json (project)"
     ),
-    configNote: 'Add to the "mcpServers" section. Reload Cursor after saving.',
+    configNote: [
+      { text: 'Add this to the "mcpServers" section, then reload Cursor.' },
+    ],
     generateConfig: (_url, key) =>
       JSON.stringify(
         {
@@ -798,10 +809,13 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     name: "Claude Code",
     description: "Anthropic's CLI coding agent",
     configPath: home("~/.claude.json (user scope)", "%USERPROFILE%\\.claude.json (user scope)"),
-    configNote:
-      "Easiest: run  claude mcp add --transport http --scope user lific " +
-      MCP_URL +
-      ' --header "Authorization: Bearer <key>"  ·  or add the block below to the "mcpServers" section.',
+    configNote: [
+      { text: "Easiest: run this command (it writes the config for you):" },
+      {
+        command: `claude mcp add --transport http --scope user lific ${MCP_URL} --header "Authorization: Bearer <key>"`,
+      },
+      { text: 'Or add the block below to the "mcpServers" section manually.' },
+    ],
     generateConfig: (_url, key) =>
       JSON.stringify(
         {
@@ -825,8 +839,10 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
       mac: "~/Library/Application Support/Claude/claude_desktop_config.json",
       windows: "%APPDATA%\\Claude\\claude_desktop_config.json",
     },
-    configNote:
-      'Requires mcp-remote (npm). Add to the "mcpServers" section, then fully restart Claude Desktop.',
+    configNote: [
+      { text: "Requires mcp-remote (installed automatically by npx)." },
+      { text: 'Add the block below to the "mcpServers" section, then fully restart Claude Desktop.' },
+    ],
     generateConfig: (_url, key) =>
       JSON.stringify(
         {
@@ -845,8 +861,10 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     name: "Codex",
     description: "OpenAI's CLI coding agent",
     configPath: home("~/.codex/config.toml", "%USERPROFILE%\\.codex\\config.toml"),
-    configNote:
-      "Add to config.toml under [mcp_servers]. The key is read from the LIFIC_API_KEY env var; set it with the command below.",
+    configNote: [
+      { text: "Add the block below under [mcp_servers] in config.toml." },
+      { text: "The key is read from the LIFIC_API_KEY env var (set it in step 3)." },
+    ],
     usesEnvKey: true,
     envVar: "LIFIC_API_KEY",
     generateConfig: (_url, _key) =>
@@ -857,8 +875,11 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     name: "Pi",
     description: "Pi coding agent (via pi-mcp-adapter)",
     configPath: home("~/.pi/agent/mcp.json", "%USERPROFILE%\\.pi\\agent\\mcp.json"),
-    configNote:
-      "Install the adapter first:  pi install npm:pi-mcp-adapter  then restart Pi. Add the block below to the \"mcpServers\" section. The key is read from the LIFIC_API_KEY env var (set it with the command below).",
+    configNote: [
+      { text: "First install the adapter, then restart Pi:" },
+      { command: "pi install npm:pi-mcp-adapter" },
+      { text: 'Add the block below to the "mcpServers" section. The key is read from the LIFIC_API_KEY env var (set it in step 3).' },
+    ],
     usesEnvKey: true,
     envVar: "LIFIC_API_KEY",
     generateConfig: (_url, _key) =>

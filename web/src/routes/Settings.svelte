@@ -47,6 +47,9 @@
   let copied = $state(false);
   let keyCopied = $state(false);
   let exportCopied = $state(false);
+  // Which note-step command chip was just copied (by index), so only that
+  // chip flashes "copied".
+  let noteCopiedIdx = $state<number | null>(null);
   // The minted key is sensitive — hidden by default, revealed on demand.
   let keyRevealed = $state(false);
 
@@ -244,6 +247,7 @@
     copied = false;
     keyCopied = false;
     exportCopied = false;
+    noteCopiedIdx = null;
     keyRevealed = false;
     selectedOs = detectOs();
     connecting = true;
@@ -284,6 +288,9 @@
   const copyConfig = () => copyToClipboard(configText(), (v) => (copied = v));
   const copyKey = () => connectKey && copyToClipboard(connectKey, (v) => (keyCopied = v));
   const copyExport = () => copyToClipboard(exportLine, (v) => (exportCopied = v));
+  async function copyNote(idx: number, command: string) {
+    await copyToClipboard(command, (v) => (noteCopiedIdx = v ? idx : null));
+  }
 
   async function handleDisconnect(id: number) {
     busyId = id;
@@ -559,7 +566,7 @@
   <div class="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" onclick={closeConnect}>
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div
-      class="w-full max-w-[540px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl
+      class="w-full max-w-[620px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl
              max-h-[85vh] overflow-y-auto"
       onclick={(e) => e.stopPropagation()}
     >
@@ -665,12 +672,32 @@
               {/if}
             </div>
 
-            <p class="text-[0.75rem] text-[var(--text-muted)] mb-1.5">
-              File:
-              <code class="font-mono text-[0.75rem] bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded text-[var(--text)] break-all">{activePath}</code>
-            </p>
+            <div class="flex items-center gap-2 mb-2.5">
+              <span class="text-[0.6875rem] font-semibold uppercase tracking-wide text-[var(--text-muted)] shrink-0">File</span>
+              <code class="flex-1 min-w-0 font-mono text-[0.75rem] bg-[var(--bg-subtle)] px-2 py-1 rounded text-[var(--text)] overflow-x-auto whitespace-nowrap">{activePath}</code>
+            </div>
+
             {#if connectTool.configNote}
-              <p class="text-[0.75rem] text-[var(--text-muted)] mb-2 leading-relaxed">{connectTool.configNote}</p>
+              <div class="flex flex-col gap-1.5 mb-2.5">
+                {#each connectTool.configNote as step, i (i)}
+                  {#if step.text}
+                    <p class="text-[0.8125rem] text-[var(--text)] leading-snug">{step.text}</p>
+                  {/if}
+                  {#if step.command}
+                    <div class="relative">
+                      <pre class="bg-[var(--bg)] border border-[var(--border)] rounded-md py-2 pl-3 pr-12 text-[0.75rem] font-mono text-[var(--text)] overflow-x-auto whitespace-pre">{step.command}</pre>
+                      <button
+                        class="absolute top-1.5 right-1.5 inline-flex items-center gap-1 text-[0.6875rem] font-semibold
+                               px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--border)]
+                               {noteCopiedIdx === i ? 'text-[var(--success)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'} transition-colors"
+                        onclick={() => copyNote(i, step.command!)}
+                      >
+                        {#if noteCopiedIdx === i}<Check size={12} /> Copied{:else}<Copy size={12} /> Copy{/if}
+                      </button>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
             {/if}
 
             <div class="relative">
