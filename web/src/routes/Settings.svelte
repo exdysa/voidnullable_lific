@@ -247,136 +247,29 @@
         </div>
       </section>
 
-      <!-- ── DASHBOARD GRID ───────────────────────────── -->
-      <div class="grid lg:grid-cols-2 gap-5 animate-reveal delay-250">
-
-        <!-- Profile (proper labeled form) -->
-        <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
-          <h2 class="text-[0.9375rem] font-semibold text-[var(--text)] mb-3.5">Profile</h2>
-          <div class="flex flex-col gap-3.5">
-            <label class="block">
-              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Display name</span>
-              <input
-                bind:value={profileName}
-                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-              />
-            </label>
-            <label class="block">
-              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Email</span>
-              <input
-                bind:value={profileEmail}
-                type="email"
-                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-              />
-            </label>
-            <div>
-              <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Username</span>
-              <p class="text-[0.875rem] font-mono text-[var(--text-muted)]">@{user.username}</p>
-            </div>
-          </div>
-          {#if profileError}
-            <p class="text-[0.75rem] text-[var(--error)] mt-2.5 flex items-center gap-1"><AlertTriangle size={12} /> {profileError}</p>
-          {/if}
-          <div class="flex items-center gap-3 mt-4">
-            <button
-              class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
-                     hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              disabled={!hasProfileChanges || profileSaving}
-              onclick={saveProfile}
-            >
-              {profileSaving ? "Saving…" : "Save changes"}
-            </button>
-            {#if profileSavedAt}
-              <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]" aria-live="polite"><Check size={13} /> Saved</span>
-            {/if}
-          </div>
-        </section>
-
-        <!-- Right column: Appearance + Security stacked -->
-        <div class="flex flex-col gap-5">
-          <!-- Appearance -->
-          <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
-            <div class="flex items-center gap-2 mb-1">
-              <Palette size={15} class="text-[var(--text-muted)]" />
-              <h2 class="text-[0.9375rem] font-semibold text-[var(--text)]">Appearance</h2>
-            </div>
-            <p class="text-[0.8125rem] text-[var(--text-muted)] mb-3.5">System follows your OS.</p>
-            <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-              {#each [["light", "Light", Sun], ["dark", "Dark", Moon], ["system", "System", Monitor]] as [val, label, Icon]}
-                {@const IconComp = Icon as typeof Sun}
-                <button
-                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.8125rem] font-medium transition-all
-                         {themePref === val
-                    ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                  onclick={() => pickTheme(val as ThemePreference)}
-                >
-                  <IconComp size={14} />
-                  {label}
-                </button>
-              {/each}
-            </div>
-          </section>
-
-          <!-- Security -->
-          <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
-            <div class="flex items-center gap-2 mb-3.5">
-              <Lock size={15} class="text-[var(--text-muted)]" />
-              <h2 class="text-[0.9375rem] font-semibold text-[var(--text)]">Security</h2>
-            </div>
-            <div class="flex flex-col gap-2.5">
-              <input
-                type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password"
-                class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-              />
-              <input
-                type="password" bind:value={newPw} placeholder="New password (min 8 chars)" autocomplete="new-password"
-                class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
-              />
-            </div>
-            {#if pwError}
-              <p class="text-[0.75rem] text-[var(--error)] mt-2 flex items-center gap-1"><AlertTriangle size={12} /> {pwError}</p>
-            {/if}
-            <div class="flex items-center gap-3 mt-3">
-              <button
-                class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
-                       hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={pwSaving || !curPw || !newPw}
-                onclick={submitPassword}
-              >
-                {pwSaving ? "Updating…" : "Change password"}
-              </button>
-              {#if pwSuccess}
-                <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]"><Check size={13} /> Changed</span>
-              {/if}
-            </div>
-            <div class="border-t border-[var(--border)] mt-4 pt-4 flex flex-wrap items-center gap-2">
-              <button
-                class="inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-[var(--text)]
-                       border border-[var(--border)] px-3 py-1.5 rounded-md
-                       hover:bg-[var(--bg-subtle)] transition-colors"
-                onclick={logoutNow}
-              >
-                <LogOut size={14} />
-                Sign out
-              </button>
-              <button
-                class="inline-flex items-center gap-1.5 text-[0.8125rem] text-[var(--error)] border border-[var(--error)]
-                       px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
-                disabled={signingOut}
-                onclick={signOutAll}
-              >
-                {signingOut ? "Signing out…" : "Sign out of all sessions"}
-              </button>
-            </div>
-          </section>
+      <!-- ── APPEARANCE ───────────────────────────────── -->
+      <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5 animate-reveal delay-250">
+        <div class="flex items-center gap-2 mb-1">
+          <Palette size={15} class="text-[var(--text-muted)]" />
+          <h2 class="text-[0.9375rem] font-semibold text-[var(--text)]">Appearance</h2>
         </div>
-      </div>
+        <p class="text-[0.8125rem] text-[var(--text-muted)] mb-3.5">System follows your OS.</p>
+        <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
+          {#each [["light", "Light", Sun], ["dark", "Dark", Moon], ["system", "System", Monitor]] as [val, label, Icon]}
+            {@const IconComp = Icon as typeof Sun}
+            <button
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.8125rem] font-medium transition-all
+                     {themePref === val
+                ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+              onclick={() => pickTheme(val as ThemePreference)}
+            >
+              <IconComp size={14} />
+              {label}
+            </button>
+          {/each}
+        </div>
+      </section>
 
       <!-- ── CONNECTED TOOLS (full width) ─────────────── -->
       <section class="mt-10 animate-reveal delay-250">
@@ -449,6 +342,119 @@
               </div>
             </div>
           {/each}
+        </div>
+      </section>
+
+      <!-- ── ACCOUNT (profile + security, bottom of page) ─── -->
+      <section class="mt-10 pt-8 border-t border-[var(--border)] animate-reveal delay-250">
+        <h2 class="text-[1rem] font-semibold text-[var(--text)] mb-1">Account</h2>
+        <p class="text-[0.875rem] text-[var(--text-muted)] mb-6 leading-relaxed">
+          Manage your profile, password, and sessions.
+        </p>
+
+        <!-- Profile (proper labeled form) -->
+        <div class="max-w-[480px] flex flex-col gap-3.5">
+          <label class="block">
+            <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Display name</span>
+            <input
+              bind:value={profileName}
+              class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            />
+          </label>
+          <label class="block">
+            <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Email</span>
+            <input
+              bind:value={profileEmail}
+              type="email"
+              class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            />
+          </label>
+          <div>
+            <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Username</span>
+            <p class="text-[0.875rem] font-mono text-[var(--text-muted)]">@{user.username}</p>
+          </div>
+        </div>
+        {#if profileError}
+          <p class="text-[0.75rem] text-[var(--error)] mt-2.5 flex items-center gap-1"><AlertTriangle size={12} /> {profileError}</p>
+        {/if}
+        <div class="flex items-center gap-3 mt-4">
+          <button
+            class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
+                   hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={!hasProfileChanges || profileSaving}
+            onclick={saveProfile}
+          >
+            {profileSaving ? "Saving…" : "Save changes"}
+          </button>
+          {#if profileSavedAt}
+            <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]" aria-live="polite"><Check size={13} /> Saved</span>
+          {/if}
+        </div>
+
+        <!-- Password -->
+        <div class="mt-8 pt-6 border-t border-[var(--border)]">
+          <div class="flex items-center gap-2 mb-3.5">
+            <Lock size={15} class="text-[var(--text-muted)]" />
+            <h3 class="text-[0.9375rem] font-semibold text-[var(--text)]">Password</h3>
+          </div>
+          <div class="max-w-[480px] flex flex-col gap-2.5">
+            <input
+              type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password"
+              class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            />
+            <input
+              type="password" bind:value={newPw} placeholder="New password (min 8 chars)" autocomplete="new-password"
+              class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
+            />
+          </div>
+          {#if pwError}
+            <p class="text-[0.75rem] text-[var(--error)] mt-2 flex items-center gap-1"><AlertTriangle size={12} /> {pwError}</p>
+          {/if}
+          <div class="flex items-center gap-3 mt-3">
+            <button
+              class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
+                     hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={pwSaving || !curPw || !newPw}
+              onclick={submitPassword}
+            >
+              {pwSaving ? "Updating…" : "Change password"}
+            </button>
+            {#if pwSuccess}
+              <span class="inline-flex items-center gap-1 text-[0.8125rem] text-[var(--success)]"><Check size={13} /> Changed</span>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Sessions (sign out) — the very bottom of the page -->
+        <div class="mt-8 pt-6 border-t border-[var(--border)]">
+          <h3 class="text-[0.9375rem] font-semibold text-[var(--text)] mb-1">Sessions</h3>
+          <p class="text-[0.8125rem] text-[var(--text-muted)] mb-3.5 leading-relaxed">
+            Sign out of this device, or revoke every active session everywhere.
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              class="inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-[var(--text)]
+                     border border-[var(--border)] px-3 py-1.5 rounded-md
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              onclick={logoutNow}
+            >
+              <LogOut size={14} />
+              Sign out
+            </button>
+            <button
+              class="inline-flex items-center gap-1.5 text-[0.8125rem] text-[var(--error)] border border-[var(--error)]
+                     px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
+              disabled={signingOut}
+              onclick={signOutAll}
+            >
+              {signingOut ? "Signing out…" : "Sign out of all sessions"}
+            </button>
+          </div>
         </div>
       </section>
     {/if}
