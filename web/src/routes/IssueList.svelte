@@ -34,6 +34,12 @@
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import { formatRelative } from "../lib/format";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
+  import {
+    compareIssues as compareIssuesPure,
+    defaultSortDir,
+    type SortField,
+    type SortDir,
+  } from "../lib/issues/sort";
 
   // LIF-119: search tuning, kept identical to the page list (LIF-118) so
   // the two list views feel consistent. See web/src/lib/fuzzy.ts for the
@@ -458,17 +464,9 @@
   let issueSearchScores = $derived(searchResult.scores);
 
   // ── Sort ────────────────────────────────────────────
-  // Topbar-controlled ordering. Applied after filter, before grouping —
-  // so the sort is honored both inside each status group AND in the
-  // flat list. `sortDir` is interpreted per field:
-  //   priority asc  = urgent first (lowest rank number)
-  //   priority desc = none first
-  //   age      asc  = oldest first
-  //   age      desc = newest first
-  //   number   asc  = smallest issue # first
-  //   number   desc = largest issue # first
-  type SortField = "priority" | "age" | "number" | "updated";
-  type SortDir = "asc" | "desc";
+  // Ordering logic lives in lib/issues/sort.ts; the component owns only the
+  // reactive field/direction selection. See that module for the per-field
+  // direction semantics.
   let sortField = $state<SortField>("priority");
   let sortDir = $state<SortDir>("asc"); // default: urgent first
 
@@ -515,52 +513,19 @@
     return (lines[0] ?? "").replace(/[*_`>[\]]/g, "").trim().slice(0, 160);
   }
 
-  const PRIORITY_RANK: Record<string, number> = {
-    urgent: 0,
-    high: 1,
-    medium: 2,
-    low: 3,
-    none: 4,
-  };
-
-  function compareIssues(a: Issue, b: Issue): number {
-    // LIF-119: when search is active, relevance wins over the user's
-    // chosen sort field. Otherwise priority/age/number drives the
-    // ordering as before.
-    if (searchQuery.trim() && issueSearchScores.size > 0) {
-      const sa = issueSearchScores.get(a.id)?.score ?? 0;
-      const sb = issueSearchScores.get(b.id)?.score ?? 0;
-      if (sa !== sb) return sb - sa;
-      // Tie-break by identifier so the order is stable across keystrokes.
-      return a.identifier.localeCompare(b.identifier);
-    }
-
-    let r = 0;
-    switch (sortField) {
-      case "priority":
-        r = (PRIORITY_RANK[a.priority] ?? 99)
-          - (PRIORITY_RANK[b.priority] ?? 99);
-        // Tie-break: newest first within the same priority so urgent
-        // issues from today float above urgents from last month.
-        if (r === 0) r = b.created_at.localeCompare(a.created_at);
-        break;
-      case "age":
-        r = a.created_at.localeCompare(b.created_at);
-        break;
-      case "updated":
-        r = a.updated_at.localeCompare(b.updated_at);
-        break;
-      case "number":
-        r = a.sequence - b.sequence;
-        break;
-    }
-    return sortDir === "asc" ? r : -r;
-  }
-
   // Sort applied to filtered issues. We make a fresh array so we don't
-  // mutate the underlying `issues` state in place.
+  // mutate the underlying `issues` state in place. The comparator is the
+  // pure compareIssues from lib/issues/sort.ts, fed the current search
+  // query + score map so relevance ordering still wins during search.
   let sortedIssues = $derived(
-    [...filteredIssues].sort(compareIssues)
+    [...filteredIssues].sort((a, b) =>
+      compareIssuesPure(a, b, {
+        searchQuery,
+        scores: issueSearchScores,
+        sortField,
+        sortDir,
+      }),
+    ),
   );
 
   /** Clicking a field selects it (with default asc) or, if already
@@ -571,8 +536,7 @@
       sortDir = sortDir === "asc" ? "desc" : "asc";
     } else {
       sortField = field;
-      // "updated" means "last activity"; newest-first is the natural default.
-      sortDir = field === "updated" ? "desc" : "asc";
+      sortDir = defaultSortDir(field);
     }
   }
 
