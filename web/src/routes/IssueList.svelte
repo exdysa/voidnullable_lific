@@ -305,11 +305,11 @@
       view.displayOpen ||
       view.newMenuOpen ||
       inlineCreateActive ||
-      statusDropdownId !== null ||
-      priorityDropdownId !== null ||
+      view.statusDropdownId !== null ||
+      view.priorityDropdownId !== null ||
       // LIF-149: a poll mustn't shuffle rows mid-selection or land stale
       // data on top of an in-flight bulk write.
-      selectedIds.size > 0 ||
+      view.selectedIds.size > 0 ||
       bulkBusy ||
       // Don't refetch while the user is typing in the search box.
       (view.searchExpanded && document.activeElement === searchInputEl)
@@ -473,7 +473,8 @@
   }
 
   // ── Keyboard navigation ──────────────────────────────
-  let focusedIndex = $state(-1);
+  // focusedIndex, the selection set, and the inline status/priority dropdown
+  // ids now live on `view`. The inline-create form vars + DOM refs stay here.
   let inlineCreateActive = $state(false);
   let inlineCreateStatus = $state("backlog");
   let inlineCreateStatusOpen = $state(false);
@@ -482,44 +483,39 @@
   let inlineCreateTitleEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
 
-  // Status / priority dropdowns on existing issue rows
-  let statusDropdownId = $state<number | null>(null);
-  let priorityDropdownId = $state<number | null>(null);
-
   // ── LIF-149: multi-select + bulk actions ─────────────
-  // Selection is ephemeral (never persisted): `x` toggles the focused
-  // row, shift+click / shift+j/k extend, ctrl/cmd+click toggles, Esc
-  // clears. While anything is selected a floating action bar offers
-  // status / priority / module / label / delete across the whole set.
-  let selectedIds = $state<Set<number>>(new Set());
-  let lastSelectedIdx = $state(-1);
+  // Selection (view.selectedIds) is ephemeral. `x` toggles the focused row,
+  // shift+click / shift+j/k extend, ctrl/cmd+click toggles, Esc clears. The
+  // selection mutators live here because they read the `flatIssues` derived.
   // Which action-bar menu is open (popovers open upward from the bar).
   let bulkMenu = $state<BulkMenu>(null);
   let bulkBusy = $state(false);
 
   function toggleSelect(id: number, idx: number) {
-    const next = new Set(selectedIds);
+    const next = new Set(view.selectedIds);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    selectedIds = next;
-    lastSelectedIdx = idx;
+    view.selectedIds = next;
+    view.lastSelectedIdx = idx;
   }
 
   function rangeSelect(idx: number) {
-    if (lastSelectedIdx < 0 || lastSelectedIdx >= flatIssues.length) {
+    if (view.lastSelectedIdx < 0 || view.lastSelectedIdx >= flatIssues.length) {
       toggleSelect(flatIssues[idx].id, idx);
       return;
     }
-    const [a, b] = lastSelectedIdx < idx ? [lastSelectedIdx, idx] : [idx, lastSelectedIdx];
-    const next = new Set(selectedIds);
+    const [a, b] =
+      view.lastSelectedIdx < idx
+        ? [view.lastSelectedIdx, idx]
+        : [idx, view.lastSelectedIdx];
+    const next = new Set(view.selectedIds);
     for (let i = a; i <= b; i++) next.add(flatIssues[i].id);
-    selectedIds = next;
-    lastSelectedIdx = idx;
+    view.selectedIds = next;
+    view.lastSelectedIdx = idx;
   }
 
   function clearSelection() {
-    selectedIds = new Set();
-    lastSelectedIdx = -1;
+    view.clearSelection();
     bulkMenu = null;
   }
 
@@ -528,8 +524,10 @@
   // writes when something actually fell out, so the effect settles.
   $effect(() => {
     const visible = new Set(flatIssues.map((i) => i.id));
-    if ([...selectedIds].some((id) => !visible.has(id))) {
-      selectedIds = new Set([...selectedIds].filter((id) => visible.has(id)));
+    if ([...view.selectedIds].some((id) => !visible.has(id))) {
+      view.selectedIds = new Set(
+        [...view.selectedIds].filter((id) => visible.has(id)),
+      );
     }
   });
 
@@ -537,11 +535,11 @@
    *  stamps the change locally on success; converges via reload if any
    *  PUT fails (rare — same tradeoff as the board's drop handler). */
   async function bulkUpdate(input: Record<string, unknown>) {
-    if (bulkBusy || selectedIds.size === 0) return;
+    if (bulkBusy || view.selectedIds.size === 0) return;
     bulkBusy = true;
     bulkMenu = null;
     skipFocusReset = true;
-    const ids = [...selectedIds];
+    const ids = [...view.selectedIds];
     const results = await Promise.all(
       ids.map((id) => trackMutation(updateIssue(id, input))),
     );
@@ -550,7 +548,7 @@
       await loadIssues();
     } else {
       issues = issues.map((i) =>
-        selectedIds.has(i.id) ? { ...i, ...(input as Partial<Issue>) } : i,
+        view.selectedIds.has(i.id) ? { ...i, ...(input as Partial<Issue>) } : i,
       );
     }
   }
@@ -558,12 +556,12 @@
   /** Add one label to every selected issue (union — issues that already
    *  carry it are skipped, not toggled, so the action is idempotent). */
   async function bulkAddLabel(name: string) {
-    if (bulkBusy || selectedIds.size === 0) return;
+    if (bulkBusy || view.selectedIds.size === 0) return;
     bulkBusy = true;
     bulkMenu = null;
     skipFocusReset = true;
     const targets = issues.filter(
-      (i) => selectedIds.has(i.id) && !i.labels.includes(name),
+      (i) => view.selectedIds.has(i.id) && !i.labels.includes(name),
     );
     const results = await Promise.all(
       targets.map((i) =>
@@ -582,18 +580,18 @@
   }
 
   async function bulkDelete() {
-    if (bulkBusy || selectedIds.size === 0) return;
+    if (bulkBusy || view.selectedIds.size === 0) return;
     bulkBusy = true;
     bulkMenu = null;
-    const ids = [...selectedIds];
+    const ids = [...view.selectedIds];
     await Promise.all(ids.map((id) => trackMutation(deleteIssue(id))));
     bulkBusy = false;
     clearSelection();
     await loadIssues();
   }
 
-  // Status picker keyboard index (shared by inline create and row dropdowns)
-  let inlineCreateStatusIdx = $state(0);
+  // Status picker keyboard index now lives on view.inlineCreateStatusIdx
+  // (shared by inline create and row dropdowns).
 
   // Debounce: prevent key-repeat from spamming actions
   let statusUpdating = false;
@@ -655,7 +653,7 @@
     if (skipFocusReset) {
       skipFocusReset = false;
     } else {
-      focusedIndex = -1;
+      view.focusedIndex = -1;
     }
   });
 
@@ -663,12 +661,12 @@
   let scrollOnFocus = false;
 
   $effect(() => {
-    if (focusedIndex < 0 || !listEl || !scrollOnFocus) {
+    if (view.focusedIndex < 0 || !listEl || !scrollOnFocus) {
       scrollOnFocus = false;
       return;
     }
     scrollOnFocus = false;
-    const row = listEl.querySelector(`[data-issue-index="${focusedIndex}"]`) as HTMLElement | null;
+    const row = listEl.querySelector(`[data-issue-index="${view.focusedIndex}"]`) as HTMLElement | null;
     if (!row) return;
 
     requestAnimationFrame(() => {
@@ -699,28 +697,28 @@
 
   function handleKeydown(e: KeyboardEvent) {
     // Status picker keyboard navigation (inline create or row dropdown)
-    if (inlineCreateStatusOpen || statusDropdownId !== null) {
+    if (inlineCreateStatusOpen || view.statusDropdownId !== null) {
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();
-        inlineCreateStatusIdx = Math.min(inlineCreateStatusIdx + 1, STATUSES.length - 1);
+        view.inlineCreateStatusIdx = Math.min(view.inlineCreateStatusIdx + 1, STATUSES.length - 1);
         return;
       }
       if (e.key === "ArrowUp" || e.key === "k") {
         e.preventDefault();
-        inlineCreateStatusIdx = Math.max(inlineCreateStatusIdx - 1, 0);
+        view.inlineCreateStatusIdx = Math.max(view.inlineCreateStatusIdx - 1, 0);
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        const picked = STATUSES[inlineCreateStatusIdx];
+        const picked = STATUSES[view.inlineCreateStatusIdx];
         if (inlineCreateStatusOpen) {
           // Inline create: pick status, move to title
           inlineCreateStatus = picked;
           inlineCreateStatusOpen = false;
           requestAnimationFrame(() => inlineCreateTitleEl?.focus());
-        } else if (statusDropdownId !== null) {
+        } else if (view.statusDropdownId !== null) {
           // Existing issue row: set status
-          const target = issues.find((i) => i.id === statusDropdownId);
+          const target = issues.find((i) => i.id === view.statusDropdownId);
           if (target && picked !== target.status) {
             skipFocusReset = true;
             trackMutation(updateIssue(target.id, { status: picked })).then((res) => {
@@ -730,7 +728,7 @@
               }
             });
           }
-          statusDropdownId = null;
+          view.statusDropdownId = null;
         }
         return;
       }
@@ -740,7 +738,7 @@
           inlineCreateStatusOpen = false;
           requestAnimationFrame(() => inlineCreateTitleEl?.focus());
         } else {
-          statusDropdownId = null;
+          view.statusDropdownId = null;
         }
         return;
       }
@@ -758,15 +756,15 @@
         if (!canFireKey()) break;
         markKeyboardActive();
         scrollOnFocus = true;
-        const prevDown = focusedIndex;
-        focusedIndex = Math.min(focusedIndex + 1, flatIssues.length - 1);
+        const prevDown = view.focusedIndex;
+        view.focusedIndex = Math.min(view.focusedIndex + 1, flatIssues.length - 1);
         // Shift extends the selection across the rows the cursor sweeps.
-        if (e.shiftKey && focusedIndex >= 0) {
-          const next = new Set(selectedIds);
+        if (e.shiftKey && view.focusedIndex >= 0) {
+          const next = new Set(view.selectedIds);
           if (prevDown >= 0 && flatIssues[prevDown]) next.add(flatIssues[prevDown].id);
-          if (flatIssues[focusedIndex]) next.add(flatIssues[focusedIndex].id);
-          selectedIds = next;
-          lastSelectedIdx = focusedIndex;
+          if (flatIssues[view.focusedIndex]) next.add(flatIssues[view.focusedIndex].id);
+          view.selectedIds = next;
+          view.lastSelectedIdx = view.focusedIndex;
         }
         break;
       }
@@ -777,28 +775,28 @@
         if (!canFireKey()) break;
         markKeyboardActive();
         scrollOnFocus = true;
-        const prevUp = focusedIndex;
-        focusedIndex = Math.max(focusedIndex - 1, 0);
-        if (e.shiftKey && focusedIndex >= 0) {
-          const next = new Set(selectedIds);
+        const prevUp = view.focusedIndex;
+        view.focusedIndex = Math.max(view.focusedIndex - 1, 0);
+        if (e.shiftKey && view.focusedIndex >= 0) {
+          const next = new Set(view.selectedIds);
           if (prevUp >= 0 && flatIssues[prevUp]) next.add(flatIssues[prevUp].id);
-          if (flatIssues[focusedIndex]) next.add(flatIssues[focusedIndex].id);
-          selectedIds = next;
-          lastSelectedIdx = focusedIndex;
+          if (flatIssues[view.focusedIndex]) next.add(flatIssues[view.focusedIndex].id);
+          view.selectedIds = next;
+          view.lastSelectedIdx = view.focusedIndex;
         }
         break;
       }
       case "x":
         // Toggle selection on the focused row (LIF-149).
-        if (focusedIndex >= 0 && focusedIndex < flatIssues.length) {
+        if (view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length) {
           e.preventDefault();
-          toggleSelect(flatIssues[focusedIndex].id, focusedIndex);
+          toggleSelect(flatIssues[view.focusedIndex].id, view.focusedIndex);
         }
         break;
       case "Enter":
-        if (focusedIndex >= 0 && focusedIndex < flatIssues.length) {
+        if (view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length) {
           e.preventDefault();
-          navigate(`/${projectIdentifier}/issues/${flatIssues[focusedIndex].identifier}`);
+          navigate(`/${projectIdentifier}/issues/${flatIssues[view.focusedIndex].identifier}`);
         }
         break;
       case "c":
@@ -806,7 +804,7 @@
         inlineCreateActive = true;
         inlineCreateStatus = "backlog";
         inlineCreateStatusOpen = true;
-        inlineCreateStatusIdx = 0;
+        view.inlineCreateStatusIdx = 0;
         inlineCreateTitle = "";
         break;
       case "/":
@@ -820,9 +818,9 @@
         view.hintsOpen = !view.hintsOpen;
         break;
       case "s":
-        if (focusedIndex >= 0 && focusedIndex < flatIssues.length && !statusUpdating && canFireKey()) {
+        if (view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length && !statusUpdating && canFireKey()) {
           e.preventDefault();
-          const focusedIssue = flatIssues[focusedIndex];
+          const focusedIssue = flatIssues[view.focusedIndex];
           const focusedId = focusedIssue.id;
           const sIdx = STATUSES.indexOf(focusedIssue.status);
           const nextStatus = STATUSES[(sIdx + 1) % STATUSES.length];
@@ -836,7 +834,7 @@
               const newIdx = flatIssues.findIndex((i) => i.id === focusedId);
               if (newIdx >= 0) {
                 scrollOnFocus = true;
-                focusedIndex = newIdx;
+                view.focusedIndex = newIdx;
               }
             }
           });
@@ -844,9 +842,9 @@
         break;
       case "p":
         // LIF-191: cycle priority on the focused row (mirrors `s` for status).
-        if (focusedIndex >= 0 && focusedIndex < flatIssues.length && canFireKey()) {
+        if (view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length && canFireKey()) {
           e.preventDefault();
-          const pIssue = flatIssues[focusedIndex];
+          const pIssue = flatIssues[view.focusedIndex];
           const pId = pIssue.id;
           const pIdx = PRIORITIES.indexOf(pIssue.priority);
           const nextP = PRIORITIES[(pIdx + 1) % PRIORITIES.length];
@@ -856,7 +854,7 @@
               pIssue.priority = nextP;
               issues = [...issues];
               const newIdx = flatIssues.findIndex((i) => i.id === pId);
-              if (newIdx >= 0) { scrollOnFocus = true; focusedIndex = newIdx; }
+              if (newIdx >= 0) { scrollOnFocus = true; view.focusedIndex = newIdx; }
             }
           });
         }
@@ -872,18 +870,18 @@
           view.sortOpen = false;
         } else if (bulkMenu !== null) {
           bulkMenu = null;
-        } else if (priorityDropdownId !== null) {
-          priorityDropdownId = null;
-        } else if (statusDropdownId !== null) {
-          statusDropdownId = null;
-        } else if (selectedIds.size > 0) {
+        } else if (view.priorityDropdownId !== null) {
+          view.priorityDropdownId = null;
+        } else if (view.statusDropdownId !== null) {
+          view.statusDropdownId = null;
+        } else if (view.selectedIds.size > 0) {
           clearSelection();
         } else if (inlineCreateActive) {
           inlineCreateActive = false;
           inlineCreateStatusOpen = false;
           inlineCreateTitle = "";
         } else {
-          focusedIndex = -1;
+          view.focusedIndex = -1;
         }
         break;
     }
@@ -922,22 +920,22 @@
     navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
   }
   function onMouseEnterRow(e: MouseEvent, idx: number) {
-    if (shouldAcceptMouse(e)) focusedIndex = idx;
+    if (shouldAcceptMouse(e)) view.focusedIndex = idx;
   }
   function toggleStatusDropdown(issue: Issue) {
-    if (statusDropdownId === issue.id) {
-      statusDropdownId = null;
+    if (view.statusDropdownId === issue.id) {
+      view.statusDropdownId = null;
     } else {
-      statusDropdownId = issue.id;
-      inlineCreateStatusIdx = Math.max(0, STATUSES.indexOf(issue.status));
+      view.statusDropdownId = issue.id;
+      view.inlineCreateStatusIdx = Math.max(0, STATUSES.indexOf(issue.status));
     }
   }
   function togglePriorityDropdown(issue: Issue) {
-    statusDropdownId = null;
-    priorityDropdownId = priorityDropdownId === issue.id ? null : issue.id;
+    view.statusDropdownId = null;
+    view.priorityDropdownId = view.priorityDropdownId === issue.id ? null : issue.id;
   }
   function pickRowStatus(issue: Issue, status: string) {
-    statusDropdownId = null;
+    view.statusDropdownId = null;
     if (status === issue.status) return;
     skipFocusReset = true;
     updateIssue(issue.id, { status }).then((res) => {
@@ -948,7 +946,7 @@
     });
   }
   function pickRowPriority(issue: Issue, priority: string) {
-    priorityDropdownId = null;
+    view.priorityDropdownId = null;
     if (priority === issue.priority) return;
     skipFocusReset = true;
     updateIssue(issue.id, { priority }).then((res) => {
@@ -965,8 +963,8 @@
   onkeydown={handleKeydown}
   onmousemove={handleMouseMove}
   onclick={() => {
-    statusDropdownId = null;
-    priorityDropdownId = null;
+    view.statusDropdownId = null;
+    view.priorityDropdownId = null;
     inlineCreateStatusOpen = false;
     view.hintsOpen = false;
     view.displayOpen = false;
@@ -1801,7 +1799,7 @@
                 <button
                   class="w-full flex items-center gap-2 px-3 py-1.5 text-left
                          text-[0.8125rem] transition-colors capitalize
-                         {si === inlineCreateStatusIdx
+                         {si === view.inlineCreateStatusIdx
                     ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
                     : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
                   onclick={() => {
@@ -1809,7 +1807,7 @@
                     inlineCreateStatusOpen = false;
                     requestAnimationFrame(() => inlineCreateTitleEl?.focus());
                   }}
-                  onmouseenter={() => { inlineCreateStatusIdx = si; }}
+                  onmouseenter={() => { view.inlineCreateStatusIdx = si; }}
                 >
                   <StatusIcon status={s} size={14} />
                   {s}
@@ -1993,9 +1991,9 @@
   <!-- LIF-149: floating bulk-action bar (component in lib/issues). Appears
        while anything is selected. bulkMenu is bound so the parent's Escape
        handler and outside-click can close the open menu. -->
-  {#if selectedIds.size > 0}
+  {#if view.selectedIds.size > 0}
     <BulkActionBar
-      selectedCount={selectedIds.size}
+      selectedCount={view.selectedIds.size}
       {bulkBusy}
       bind:bulkMenu
       {modules}
@@ -2034,13 +2032,13 @@
     {modules}
     density={view.density}
     groupBy={view.groupBy}
-    isFocused={idx === focusedIndex}
-    isSelected={selectedIds.has(issue.id)}
-    selectionActive={selectedIds.size > 0}
+    isFocused={idx === view.focusedIndex}
+    isSelected={view.selectedIds.has(issue.id)}
+    selectionActive={view.selectedIds.size > 0}
     hitSnippet={issueSearchScores.get(issue.id)?.snippet ?? null}
-    statusOpen={statusDropdownId === issue.id}
-    priorityOpen={priorityDropdownId === issue.id}
-    statusPickerIdx={inlineCreateStatusIdx}
+    statusOpen={view.statusDropdownId === issue.id}
+    priorityOpen={view.priorityDropdownId === issue.id}
+    statusPickerIdx={view.inlineCreateStatusIdx}
     onOpen={openIssue}
     onRangeSelect={rangeSelect}
     onToggleSelect={toggleSelect}
@@ -2049,7 +2047,7 @@
     onTogglePriorityDropdown={togglePriorityDropdown}
     onPickStatus={pickRowStatus}
     onPickPriority={pickRowPriority}
-    onHoverStatusOption={(si) => { inlineCreateStatusIdx = si; }}
+    onHoverStatusOption={(si) => { view.inlineCreateStatusIdx = si; }}
   />
 {/snippet}
 

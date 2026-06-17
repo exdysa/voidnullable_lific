@@ -53,9 +53,29 @@ export class IssueListState {
   sortOpen = $state(false);
   newMenuOpen = $state(false);
 
+  // ── Row interaction: keyboard focus, multi-select, inline dropdowns ──
+  // Shared between the keyboard handler, the bulk handlers, and IssueRow.
+  // The selection mutators (toggle/range/clear) stay in the component because
+  // they depend on its `flatIssues` derived; they write these fields.
+  focusedIndex = $state(-1);
+  selectedIds = $state<Set<number>>(new Set());
+  lastSelectedIdx = $state(-1);
+  /** Issue id whose inline status picker is open (or null). */
+  statusDropdownId = $state<number | null>(null);
+  /** Issue id whose inline priority picker is open (or null). */
+  priorityDropdownId = $state<number | null>(null);
+  /** Highlighted index within an open status picker (shared by inline-create
+   *  and row dropdowns). Kept under the original name to limit churn. */
+  inlineCreateStatusIdx = $state(0);
+
   /** True once a hydrate pass has run, so the persist effect doesn't clobber
    *  storage with defaults before the stored values are loaded. */
   hydrated = $state(false);
+
+  clearSelection(): void {
+    this.selectedIds = new Set();
+    this.lastSelectedIdx = -1;
+  }
 
   // ── Filter helpers ──
   hasActiveFilters(): boolean {
