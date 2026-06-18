@@ -151,16 +151,20 @@ fn assemble_tree(flat: Vec<PlanStepNode>) -> Vec<PlanStepNode> {
 
 /// List plans (header rows only, no tree) with optional status filter.
 pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, LificError> {
-    let mut sql = String::from(
-        "SELECT pl.id, pl.project_id, pl.sequence, p.identifier, pl.issue_id, pl.title,
-                pl.status, pl.created_at, pl.updated_at,
-                (SELECT ap.identifier || '-' || ai.sequence
-                   FROM issues ai JOIN projects ap ON ap.id = ai.project_id
-                  WHERE ai.id = pl.issue_id),
-                (SELECT COUNT(*) FROM plan_steps s WHERE s.plan_id = pl.id),
-                (SELECT COUNT(*) FROM plan_steps s WHERE s.plan_id = pl.id AND s.done = 1)
-         FROM plans pl
-         JOIN projects p ON p.id = pl.project_id",
+    // Page-then-aggregate. The original ran two correlated COUNT(*) subqueries
+    // over plan_steps per output row; benchmarking + EXPLAIN QUERY PLAN showed
+    // a naive `LEFT JOIN plan_steps ... GROUP BY` was actually *slower*,
+    // because it forced a temp B-tree over every step of every matching plan
+    // before ORDER BY/LIMIT could trim to one page (research takeaway: "reduce
+    // the result set early"). So we pick + order + limit the plan page FIRST in
+    // an inner query (no joins, uses idx_plans_project), then LEFT JOIN steps
+    // onto just those rows and aggregate. COUNT(s.id) (not COUNT(*)) reports 0
+    // for stepless plans, and COALESCE(SUM(s.done),0) folds the done tally into
+    // the same single scan. The anchor identifier stays a scalar PK lookup.
+    let mut inner = String::from(
+        "SELECT pl.id, pl.project_id, pl.sequence, pl.issue_id, pl.title,
+                pl.status, pl.created_at, pl.updated_at
+         FROM plans pl",
     );
     let mut conditions: Vec<String> = Vec::new();
     let mut pv: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -174,17 +178,32 @@ pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, Li
         pv.push(Box::new(status.clone()));
     }
     if !conditions.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&conditions.join(" AND "));
+        inner.push_str(" WHERE ");
+        inner.push_str(&conditions.join(" AND "));
     }
-    sql.push_str(" ORDER BY pl.updated_at DESC, pl.id DESC");
+    inner.push_str(" ORDER BY pl.updated_at DESC, pl.id DESC");
 
     // LIF-141 class: clamp limit to a sane bound, never unbounded/negative.
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let offset = q.offset.unwrap_or(0).max(0);
-    sql.push_str(&format!(" LIMIT ?{} OFFSET ?{}", pv.len() + 1, pv.len() + 2));
+    inner.push_str(&format!(" LIMIT ?{} OFFSET ?{}", pv.len() + 1, pv.len() + 2));
     pv.push(Box::new(limit));
     pv.push(Box::new(offset));
+
+    let sql = format!(
+        "SELECT pl.id, pl.project_id, pl.sequence, p.identifier, pl.issue_id, pl.title,
+                pl.status, pl.created_at, pl.updated_at,
+                (SELECT ap.identifier || '-' || ai.sequence
+                   FROM issues ai JOIN projects ap ON ap.id = ai.project_id
+                  WHERE ai.id = pl.issue_id),
+                COUNT(s.id),
+                COALESCE(SUM(s.done), 0)
+         FROM ({inner}) pl
+         JOIN projects p ON p.id = pl.project_id
+         LEFT JOIN plan_steps s ON s.plan_id = pl.id
+         GROUP BY pl.id
+         ORDER BY pl.updated_at DESC, pl.id DESC"
+    );
 
     let refs: Vec<&dyn rusqlite::types::ToSql> = pv.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
@@ -949,6 +968,45 @@ mod tests {
         assert_eq!(active[0].title, "Active");
         assert_eq!(active[0].step_count, 2);
         assert_eq!(active[0].done_count, 1);
+    }
+
+    // Guards the page-then-aggregate rewrite: a stepless plan must report
+    // step_count = 0. With COUNT(*) the LEFT JOIN's NULL row would wrongly
+    // count as 1; COUNT(s.id) ignores it. SUM(done) over no rows is NULL,
+    // so COALESCE keeps done_count = 0.
+    #[test]
+    fn list_plans_stepless_reports_zero_counts() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        create_plan(&conn, &CreatePlan { project_id: pid, title: "Empty".into(), issue_id: None, steps: vec![] }).unwrap();
+
+        let plans = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), ..Default::default() }).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_count, 0, "stepless plan must count 0, not 1");
+        assert_eq!(plans[0].done_count, 0);
+    }
+
+    // The rewrite pages plans in an inner query, then re-orders after the
+    // step join — ordering must survive that round-trip.
+    #[test]
+    fn list_plans_orders_newest_first_and_pages() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for i in 0..5 {
+            create_plan(&conn, &CreatePlan { project_id: pid, title: format!("Plan {i}"), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        }
+        let page = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), status: None, limit: Some(2), offset: Some(0) }).unwrap();
+        assert_eq!(page.len(), 2);
+        // Newest (highest id / latest updated_at) first.
+        assert_eq!(page[0].title, "Plan 4");
+        assert_eq!(page[1].title, "Plan 3");
+        assert_eq!(page[0].step_count, 1);
+
+        let next = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), status: None, limit: Some(2), offset: Some(2) }).unwrap();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].title, "Plan 2");
     }
 
     // ── Audit coverage (LIF-176) ──
