@@ -603,9 +603,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // already-compressed images, and bodies under 32 bytes.
                 .layer(CompressionLayer::new());
 
-            let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
-            info!(addr = %addr, "lific server started (REST + MCP + OAuth at /mcp)");
+            let bind_addr = format!("{}:{}", cfg.server.host, cfg.server.port);
+            let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+            info!(addr = %bind_addr, "lific server started (REST + MCP + OAuth at /mcp)");
+            info!(url = "http://localhost:3456", "connection hint (or use public_url from config)");
 
             let shutdown_pool = pool.clone();
             let server =

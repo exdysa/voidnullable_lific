@@ -34,8 +34,7 @@ lific start    # starts on port 3456
 ```
 
 On first run, Lific generates an API key and prints it to the console. It won't be shown again. This key is used for MCP and API access.
-
-Open `http://localhost:3456` to use the web UI. The first account you create is the admin.
+Open your browser to `http://localhost:3456` for access to the web UI. The first account you create is the admin.
 
 The CLI also works directly against the database. No server or auth required:
 
@@ -50,22 +49,29 @@ lific search "authentication" --project APP
 
 Add `--json` to any command for machine-readable output.
 
+You can generate a new key using:
+
+```bash
+lific key create --name my-key
+```
+
 ## Connecting AI tools
 
-Point your MCP client at the server. Replace `your-api-key` with the key from first run (or create one with `lific key create --name my-key`).
+Point your MCP client at the server. Replace `<your-api-key>` with the key from first run (or create one with `lific key create --name my-key`).
 
 **Access MCP commands:**
 
-```json
+````json
 {
   "lific": {
+    "enabled": true,
     "type": "remote",
     "url": "http://localhost:3456/mcp",
     "headers": {
-      "Authorization": "Bearer your-api-key"
+      "Authorization": "Bearer <your-api-key>"
     }
   }
-}
+}`
 ```
 
 **Access CLI commands:**
@@ -73,6 +79,7 @@ Point your MCP client at the server. Replace `your-api-key` with the key from fi
 ```json
 {
   "lific": {
+    "enabled": true,
     "type": "local",
     "command": ["lific", "--db", "path/to/lific.db", "mcp"]
   }
@@ -231,3 +238,4 @@ Issues and PRs welcome. If you're planning something big, open an issue first so
 ## License
 
 [Apache-2.0](LICENSE)
+````
